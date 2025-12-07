@@ -1,5 +1,9 @@
 -- Supabase SQL Migration: 002_rls_policies.sql
 -- Row Level Security Policies for Employee Management Portal
+-- =====================================================
+-- DATABASE: playfunia_employee_management
+-- Run this AFTER 001_create_tables.sql in the SAME database/project
+-- =====================================================
 
 -- Enable RLS on all tables
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;

@@ -1,5 +1,9 @@
 -- Supabase SQL Migration: 004_storage_setup.sql
 -- Storage bucket setup for task media
+-- =====================================================
+-- DATABASE: playfunia_employee_management
+-- Run this AFTER 003_views_and_functions.sql in the SAME database/project
+-- =====================================================
 
 -- Create the task-media bucket
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)

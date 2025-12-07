@@ -1,5 +1,9 @@
 -- Supabase SQL Migration: 003_views_and_functions.sql
 -- Secure Views and Additional Functions
+-- =====================================================
+-- DATABASE: playfunia_employee_management
+-- Run this AFTER 002_rls_policies.sql in the SAME database/project
+-- =====================================================
 
 -- =====================================================
 -- View: employee_recent_transactions

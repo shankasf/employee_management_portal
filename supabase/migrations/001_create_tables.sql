@@ -1,9 +1,13 @@
 -- Supabase SQL Migration: 001_create_tables.sql
 -- Employee Management Portal - Complete Database Schema
 -- =====================================================
+-- DATABASE: playfunia_employee_management
+-- This is migration 1 of 4 - Run ALL migrations in the SAME database
+-- =====================================================
+--
 -- IMPORTANT: Database Setup Instructions
 -- =====================================================
--- 
+--
 -- Option 1: Create a NEW Supabase Project (Recommended)
 --   - Go to https://supabase.com/dashboard
 --   - Click "New Project" and create a dedicated project for this app
@@ -24,6 +28,8 @@
 --   - Connect to it: \c playfunia_employee_management
 --   - Then run these migrations
 --
+-- =====================================================
+-- RUN ORDER: 001 -> 002 -> 003 -> 004 (all in same DB)
 -- =====================================================
 
 -- Enable necessary extensions
