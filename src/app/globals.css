@@ -1,0 +1,191 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  --primary: #6366f1;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f5f9;
+  --secondary-foreground: #0f172a;
+  --accent: #f1f5f9;
+  --accent-foreground: #0f172a;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --card: #ffffff;
+  --card-foreground: #171717;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+  --ring: #6366f1;
+  --success: #22c55e;
+  --warning: #f59e0b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+    --primary: #818cf8;
+    --primary-foreground: #ffffff;
+    --secondary: #1e293b;
+    --secondary-foreground: #f8fafc;
+    --accent: #1e293b;
+    --accent-foreground: #f8fafc;
+    --destructive: #f87171;
+    --destructive-foreground: #ffffff;
+    --muted: #1e293b;
+    --muted-foreground: #94a3b8;
+    --card: #171717;
+    --card-foreground: #ededed;
+    --border: #334155;
+    --input: #334155;
+    --ring: #818cf8;
+    --success: #4ade80;
+    --warning: #fbbf24;
+  }
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-primary text-primary-foreground h-10 px-4 py-2;
+  }
+  .btn-primary:hover {
+    opacity: 0.9;
+  }
+
+  .btn-secondary {
+    @apply btn bg-secondary text-secondary-foreground h-10 px-4 py-2;
+  }
+  .btn-secondary:hover {
+    opacity: 0.8;
+  }
+
+  .btn-destructive {
+    @apply btn bg-destructive text-destructive-foreground h-10 px-4 py-2;
+  }
+  .btn-destructive:hover {
+    opacity: 0.9;
+  }
+
+  .btn-outline {
+    @apply btn border border-input bg-background h-10 px-4 py-2;
+  }
+  .btn-outline:hover {
+    @apply bg-accent text-accent-foreground;
+  }
+
+  .btn-ghost {
+    @apply btn h-10 px-4 py-2;
+  }
+  .btn-ghost:hover {
+    @apply bg-accent text-accent-foreground;
+  }
+
+  .btn-sm {
+    @apply h-9 rounded-md px-3;
+  }
+
+  .btn-lg {
+    @apply h-11 rounded-md px-8;
+  }
+
+  .btn-icon {
+    @apply h-10 w-10;
+  }
+
+  .input {
+    @apply flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .label {
+    @apply text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70;
+  }
+
+  .card {
+    @apply rounded-lg border bg-card text-card-foreground shadow-sm;
+  }
+
+  .card-header {
+    @apply flex flex-col space-y-1.5 p-6;
+  }
+
+  .card-title {
+    @apply text-2xl font-semibold leading-none tracking-tight;
+  }
+
+  .card-description {
+    @apply text-sm text-muted-foreground;
+  }
+
+  .card-content {
+    @apply p-6 pt-0;
+  }
+
+  .card-footer {
+    @apply flex items-center p-6 pt-0;
+  }
+
+  .badge {
+    @apply inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors;
+  }
+
+  .badge-default {
+    @apply badge border-transparent bg-primary text-primary-foreground;
+  }
+
+  .badge-secondary {
+    @apply badge border-transparent bg-secondary text-secondary-foreground;
+  }
+
+  .badge-destructive {
+    @apply badge border-transparent bg-destructive text-destructive-foreground;
+  }
+
+  .badge-outline {
+    @apply badge text-foreground;
+  }
+
+  .badge-success {
+    @apply badge border-transparent bg-green-100 text-green-800;
+  }
+
+  .badge-warning {
+    @apply badge border-transparent bg-yellow-100 text-yellow-800;
+  }
+
+  .sidebar-link {
+    @apply flex items-center gap-3 rounded-lg px-3 py-2 text-muted-foreground transition-all;
+  }
+  .sidebar-link:hover {
+    @apply text-foreground bg-accent;
+  }
+
+  .sidebar-link-active {
+    @apply sidebar-link bg-accent text-foreground;
+  }
+}
