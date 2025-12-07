@@ -29,11 +29,26 @@ Fill in `.env.local`:
 - `SUPABASE_SERVICE_ROLE_KEY` – service role key (server only; never exposed client-side)
 
 4) **Database setup (Supabase)**
-Run the migrations in order from `supabase/migrations/` using the Supabase SQL editor or CLI:
-- `001_create_tables.sql` – tables and indexes
-- `002_rls_policies.sql` – Row Level Security policies
-- `003_views_and_functions.sql` – views + RPC helpers (e.g., `clock_in`, `get_today_tasks`, `get_my_upcoming_events`)
-- `004_storage_setup.sql` – `task-media` bucket and policies
+
+> ⚠️ **IMPORTANT:** If you have other projects in your Supabase account, create a **NEW Supabase project** for this app to keep databases isolated.
+
+**Option A: New Supabase Project (Recommended)**
+- Go to [Supabase Dashboard](https://supabase.com/dashboard)
+- Click **New Project** → name it `playfunia-employee-management`
+- Copy the project URL and keys to `.env.local`
+
+**Option B: Self-hosted PostgreSQL**
+```sql
+-- Connect as superuser and create database
+CREATE DATABASE playfunia_employee_management;
+\c playfunia_employee_management
+```
+
+**Run migrations** in order from `supabase/migrations/` using the SQL Editor:
+1. `001_create_tables.sql` – tables, indexes, triggers
+2. `002_rls_policies.sql` – Row Level Security policies  
+3. `003_views_and_functions.sql` – views + RPC functions
+4. `004_storage_setup.sql` – `task-media` bucket and policies
 
 5) **Start the app**
 ```bash

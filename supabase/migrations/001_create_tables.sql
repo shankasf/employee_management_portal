@@ -1,5 +1,30 @@
 -- Supabase SQL Migration: 001_create_tables.sql
 -- Employee Management Portal - Complete Database Schema
+-- =====================================================
+-- IMPORTANT: Database Setup Instructions
+-- =====================================================
+-- 
+-- Option 1: Create a NEW Supabase Project (Recommended)
+--   - Go to https://supabase.com/dashboard
+--   - Click "New Project" and create a dedicated project for this app
+--   - Run these migrations in the SQL Editor
+--
+-- Option 2: Use existing Supabase project with separate schema
+--   - If you have other projects in the same Supabase instance,
+--   - consider using a separate schema to isolate this app's tables:
+--
+--   CREATE SCHEMA IF NOT EXISTS playfunia;
+--   SET search_path TO playfunia, public;
+--
+--   Then prefix all table names with 'playfunia.' or set search_path
+--   NOTE: This requires modifying all table references in the app code
+--
+-- Option 3: Self-hosted PostgreSQL
+--   - Create database: CREATE DATABASE playfunia_employee_management;
+--   - Connect to it: \c playfunia_employee_management
+--   - Then run these migrations
+--
+-- =====================================================
 
 -- Enable necessary extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
