@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useAuth } from '@/contexts/AuthContext'
-import { ReactNode, useState } from 'react'
+import { ReactNode, useState, useEffect } from 'react'
 
 const adminNavItems = [
     { name: 'Dashboard', href: '/admin', icon: '📊' },
@@ -20,13 +20,39 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
     const router = useRouter()
     const { profile, signOut, isLoading } = useAuth()
     const [sidebarOpen, setSidebarOpen] = useState(false)
+    const [signingOut, setSigningOut] = useState(false)
+    const [loadingTimeout, setLoadingTimeout] = useState(false)
 
-    const handleSignOut = async () => {
-        await signOut()
-        router.push('/login')
+    // Add timeout to prevent infinite loading
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            if (isLoading) {
+                setLoadingTimeout(true)
+            }
+        }, 5000) // 5 second timeout
+        return () => clearTimeout(timer)
+    }, [isLoading])
+
+    const handleSignOut = () => {
+        if (signingOut) return
+        setSigningOut(true)
+
+        // Fire-and-forget; we don't wait for network to finish before redirecting
+        signOut().catch((err) => console.error('Error during sign out:', err)).finally(() => {
+            setSigningOut(false)
+        })
+
+        setSidebarOpen(false)
+        router.replace('/login')
+        // Hard fallback in case router navigation is blocked
+        setTimeout(() => {
+            if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+                window.location.replace('/login')
+            }
+        }, 150)
     }
 
-    if (isLoading) {
+    if (isLoading && !loadingTimeout) {
         return (
             <div className="min-h-screen flex items-center justify-center">
                 <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
@@ -95,11 +121,13 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
                             </div>
                         </div>
                         <button
+                            type="button"
                             onClick={handleSignOut}
-                            className="btn-ghost w-full justify-start text-sm text-muted-foreground hover:text-destructive"
+                            disabled={signingOut}
+                            className="btn-ghost w-full justify-start text-sm text-muted-foreground hover:text-destructive disabled:opacity-50"
                         >
                             <span className="mr-2">🚪</span>
-                            Sign Out
+                            {signingOut ? 'Signing out...' : 'Sign Out'}
                         </button>
                     </div>
                 </div>

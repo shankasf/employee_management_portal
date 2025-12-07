@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
-import { createClient, createUntypedClient } from '@/lib/supabase/client'
+import { createUntypedClient } from '@/lib/supabase/client'
 import { formatDateTime } from '@/lib/utils'
 
 interface WaiverResult {
@@ -18,8 +18,8 @@ interface StaffNote {
     note: string
     created_at: string
     events: {
-        title: string
-    } | null
+        title: string | null
+    }[] | null
 }
 
 export default function CheckInToolsPage() {
@@ -44,7 +44,7 @@ export default function CheckInToolsPage() {
         setSearching(true)
         setSearched(true)
         try {
-            const supabase = createClient()
+            const supabase = createUntypedClient()
             const { data, error } = await supabase
                 .from('waivers')
                 .select('id, phone, customer_name, signed_at, waiver_url')
@@ -65,7 +65,7 @@ export default function CheckInToolsPage() {
     async function loadMyNotes() {
         setLoadingNotes(true)
         try {
-            const supabase = createClient()
+            const supabase = createUntypedClient()
             const { data, error } = await supabase
                 .from('staff_notes')
                 .select(`
@@ -80,7 +80,7 @@ export default function CheckInToolsPage() {
                 .limit(20)
 
             if (error) throw error
-            setMyNotes(data || [])
+            setMyNotes((data as StaffNote[]) || [])
         } catch (err) {
             console.error('Error loading notes:', err)
         } finally {
@@ -277,12 +277,12 @@ export default function CheckInToolsPage() {
                                             <p className="text-sm">{note.note}</p>
                                             <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
                                                 <span>{formatDateTime(note.created_at)}</span>
-                                                {note.events && (
+                                                {note.events?.length ? (
                                                     <>
                                                         <span>•</span>
-                                                        <span>🎉 {note.events.title}</span>
+                                                        <span>🎉 {note.events[0]?.title || 'Event'}</span>
                                                     </>
-                                                )}
+                                                ) : null}
                                             </div>
                                         </div>
                                     ))}

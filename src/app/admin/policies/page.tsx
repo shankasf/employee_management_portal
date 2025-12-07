@@ -34,7 +34,7 @@ export default function PoliciesPage() {
     async function loadPolicies() {
         setLoading(true)
         try {
-            const supabase = createClient()
+            const supabase = createUntypedClient()
             const { data, error } = await supabase
                 .from('policy_strips')
                 .select('*')

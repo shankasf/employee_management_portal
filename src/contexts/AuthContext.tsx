@@ -1,7 +1,7 @@
 'use client'
 
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { createClient, createUntypedClient } from '@/lib/supabase/client'
 import { User, Session } from '@supabase/supabase-js'
 import { Tables } from '@/types/supabase'
 
@@ -33,24 +33,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const supabase = createClient()
 
     const fetchProfile = async (userId: string) => {
-        const { data: profileData } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('id', userId)
-            .single()
+        try {
+            const db = createUntypedClient()
+            const { data: profileData, error: profileError } = await db
+                .from('profiles')
+                .select('*')
+                .eq('id', userId)
+                .single()
 
-        if (profileData) {
-            setProfile(profileData)
-        }
+            if (profileError) {
+                console.error('Error fetching profile:', profileError)
+            }
+            if (profileData) {
+                setProfile(profileData as Profile)
+            }
 
-        const { data: employeeData } = await supabase
-            .from('employees')
-            .select('*')
-            .eq('id', userId)
-            .single()
+            const { data: employeeData, error: employeeError } = await db
+                .from('employees')
+                .select('*')
+                .eq('id', userId)
+                .single()
 
-        if (employeeData) {
-            setEmployee(employeeData)
+            if (employeeError) {
+                console.error('Error fetching employee:', employeeError)
+            }
+            if (employeeData) {
+                setEmployee(employeeData as Employee)
+            }
+        } catch (err) {
+            console.error('Error in fetchProfile:', err)
         }
     }
 
@@ -108,12 +119,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { error }
     }
 
+    const clearClientSession = () => {
+        if (typeof window === 'undefined') return
+        // Clear localStorage keys related to Supabase
+        try {
+            Object.keys(window.localStorage)
+                .filter((k) => k.toLowerCase().includes('supabase'))
+                .forEach((k) => window.localStorage.removeItem(k))
+        } catch (err) {
+            console.warn('localStorage clear warning:', err)
+        }
+        // Clear sb-* cookies set by Supabase auth helpers
+        try {
+            document.cookie
+                .split(';')
+                .map((c) => c.split('=')[0]?.trim())
+                .filter((name) => name && (name.startsWith('sb-') || name.toLowerCase().includes('supabase')))
+                .forEach((name) => {
+                    document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`
+                })
+        } catch (err) {
+            console.warn('cookie clear warning:', err)
+        }
+    }
+
     const signOut = async () => {
-        await supabase.auth.signOut()
-        setUser(null)
-        setProfile(null)
-        setEmployee(null)
-        setSession(null)
+        const abort = new AbortController()
+        const timeout = setTimeout(() => abort.abort(), 1500)
+        try {
+            // Call server-side signout to clear HttpOnly cookies used by middleware
+            await fetch('/api/auth/signout', { method: 'POST', signal: abort.signal, cache: 'no-store', keepalive: true }).catch(() => undefined)
+
+            await supabase.auth.signOut()
+        } catch (err) {
+            console.error('Supabase signOut error:', err)
+        } finally {
+            clearTimeout(timeout)
+            clearClientSession()
+            setUser(null)
+            setProfile(null)
+            setEmployee(null)
+            setSession(null)
+        }
     }
 
     const value: AuthContextType = {

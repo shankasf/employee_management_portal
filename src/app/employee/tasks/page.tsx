@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
-import { createClient, createUntypedClient } from '@/lib/supabase/client'
+import { createUntypedClient } from '@/lib/supabase/client'
 import { formatDate } from '@/lib/utils'
 
 interface TaskInstance {
@@ -37,7 +37,7 @@ export default function EmployeeTasksPage() {
     const loadTasks = useCallback(async () => {
         setLoading(true)
         try {
-            const supabase = createClient()
+            const supabase = createUntypedClient()
             let query = supabase
                 .from('task_instances')
                 .select(`

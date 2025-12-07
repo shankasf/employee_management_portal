@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { createUntypedClient } from '@/lib/supabase/client'
 import { formatDate, formatTime, formatHours } from '@/lib/utils'
 
 interface AttendanceLog {
@@ -23,7 +23,7 @@ export default function EmployeeAttendancePage() {
     const loadAttendance = useCallback(async () => {
         setLoading(true)
         try {
-            const supabase = createClient()
+            const supabase = createUntypedClient()
             const startDate = new Date(month + '-01')
             const endDate = new Date(startDate)
             endDate.setMonth(endDate.getMonth() + 1)

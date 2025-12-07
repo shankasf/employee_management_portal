@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
+import { createUntypedClient } from '@/lib/supabase/client'
 import { formatHours, formatDate, formatTime } from '@/lib/utils'
 
 interface AttendanceLog {
@@ -33,7 +33,7 @@ export default function AttendancePage() {
     async function loadAttendance() {
         setLoading(true)
         try {
-            const supabase = createClient()
+            const supabase = createUntypedClient()
             const startOfDay = new Date(dateFilter)
             startOfDay.setHours(0, 0, 0, 0)
             const endOfDay = new Date(dateFilter)

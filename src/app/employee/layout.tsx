@@ -17,10 +17,23 @@ export default function EmployeeLayout({ children }: { children: ReactNode }) {
     const router = useRouter()
     const { profile, employee, signOut, isLoading } = useAuth()
     const [sidebarOpen, setSidebarOpen] = useState(false)
+    const [signingOut, setSigningOut] = useState(false)
 
-    const handleSignOut = async () => {
-        await signOut()
-        router.push('/login')
+    const handleSignOut = () => {
+        if (signingOut) return
+        setSigningOut(true)
+
+        signOut().catch((err) => console.error('Error during sign out:', err)).finally(() => {
+            setSigningOut(false)
+        })
+
+        setSidebarOpen(false)
+        router.replace('/login')
+        setTimeout(() => {
+            if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+                window.location.replace('/login')
+            }
+        }, 150)
     }
 
     if (isLoading) {
@@ -96,11 +109,13 @@ export default function EmployeeLayout({ children }: { children: ReactNode }) {
                             </div>
                         </div>
                         <button
+                            type="button"
                             onClick={handleSignOut}
-                            className="btn-ghost w-full justify-start text-sm text-muted-foreground hover:text-destructive"
+                            disabled={signingOut}
+                            className="btn-ghost w-full justify-start text-sm text-muted-foreground hover:text-destructive disabled:opacity-50"
                         >
                             <span className="mr-2">🚪</span>
-                            Sign Out
+                            {signingOut ? 'Signing out...' : 'Sign Out'}
                         </button>
                     </div>
                 </div>

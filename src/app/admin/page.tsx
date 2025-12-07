@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/client'
+import { createUntypedClient } from '@/lib/supabase/client'
 
 interface DashboardStats {
     active_employees: number
@@ -13,19 +13,43 @@ interface DashboardStats {
     events_this_week: number
 }
 
+const defaultStats: DashboardStats = {
+    active_employees: 0,
+    clocked_in_today: 0,
+    tasks_completed_today: 0,
+    tasks_pending_today: 0,
+    events_today: 0,
+    events_this_week: 0,
+}
+
 export default function AdminDashboard() {
-    const [stats, setStats] = useState<DashboardStats | null>(null)
+    const [stats, setStats] = useState<DashboardStats>(defaultStats)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
 
     useEffect(() => {
         async function loadStats() {
             try {
-                const supabase = createClient()
-                const { data, error } = await supabase.rpc('get_admin_dashboard_stats')
+                const supabase = createUntypedClient()
 
-                if (error) throw error
-                setStats(data?.[0] || null)
+                // Try RPC first, fall back to manual counts
+                const { data, error: rpcError } = await supabase.rpc('get_admin_dashboard_stats')
+
+                if (rpcError) {
+                    console.error('RPC error, fetching manually:', rpcError)
+                    // Fallback: count employees manually
+                    const { count: empCount } = await supabase
+                        .from('employees')
+                        .select('*', { count: 'exact', head: true })
+                        .eq('is_active', true)
+
+                    setStats({
+                        ...defaultStats,
+                        active_employees: empCount || 0
+                    })
+                } else {
+                    setStats(data?.[0] || defaultStats)
+                }
             } catch (err) {
                 console.error('Error loading stats:', err)
                 setError('Failed to load dashboard statistics')
@@ -34,7 +58,12 @@ export default function AdminDashboard() {
             }
         }
 
-        loadStats()
+        // Add timeout to prevent infinite loading
+        const timeout = setTimeout(() => {
+            setLoading(false)
+        }, 5000)
+
+        loadStats().finally(() => clearTimeout(timeout))
     }, [])
 
     const statCards = [
@@ -185,10 +214,10 @@ export default function AdminDashboard() {
                                     className="bg-primary h-2 rounded-full transition-all"
                                     style={{
                                         width: `${stats && (stats.tasks_completed_today + stats.tasks_pending_today) > 0
-                                                ? (stats.tasks_completed_today /
-                                                    (stats.tasks_completed_today + stats.tasks_pending_today)) *
-                                                100
-                                                : 0
+                                            ? (stats.tasks_completed_today /
+                                                (stats.tasks_completed_today + stats.tasks_pending_today)) *
+                                            100
+                                            : 0
                                             }%`,
                                     }}
                                 ></div>

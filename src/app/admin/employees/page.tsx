@@ -1,8 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { createClient } from '@/lib/supabase/client'
-// Utility functions removed - not used
+import { createUntypedClient } from '@/lib/supabase/client'
 
 interface Employee {
     id: string
@@ -15,6 +14,7 @@ interface Employee {
         full_name: string | null
         role: string
         status: string
+        email_confirmed_at: string | null
     } | null
 }
 
@@ -22,6 +22,81 @@ export default function EmployeesPage() {
     const [employees, setEmployees] = useState<Employee[]>([])
     const [loading, setLoading] = useState(true)
     const [showInactive, setShowInactive] = useState(false)
+    const [showModal, setShowModal] = useState(false)
+    const [showEditModal, setShowEditModal] = useState(false)
+    const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null)
+    const [saving, setSaving] = useState(false)
+    const [formData, setFormData] = useState({
+        email: '',
+        password: '',
+        full_name: '',
+        display_name: '',
+        position: '',
+        shift_type: 'full-time',
+        role: 'employee'
+    })
+    const [editFormData, setEditFormData] = useState({
+        display_name: '',
+        position: '',
+        shift_type: 'full-time',
+        role: 'employee',
+        is_active: true
+    })
+
+    function openEditModal(emp: Employee) {
+        setEditingEmployee(emp)
+        setEditFormData({
+            display_name: emp.display_name || '',
+            position: emp.position || '',
+            shift_type: emp.shift_type || 'full-time',
+            role: emp.profiles?.role || 'employee',
+            is_active: emp.is_active
+        })
+        setShowEditModal(true)
+    }
+
+    async function handleEditSubmit(e: React.FormEvent) {
+        e.preventDefault()
+        if (!editingEmployee) return
+        setSaving(true)
+        try {
+            const supabase = createUntypedClient()
+
+            // Update employee table
+            const { error: empError } = await supabase
+                .from('employees')
+                .update({
+                    display_name: editFormData.display_name || null,
+                    position: editFormData.position || null,
+                    shift_type: editFormData.shift_type,
+                    is_active: editFormData.is_active
+                })
+                .eq('id', editingEmployee.id)
+
+            if (empError) throw empError
+
+            // Update profile role if changed
+            if (editFormData.role !== editingEmployee.profiles?.role) {
+                const { error: profileError } = await supabase
+                    .from('profiles')
+                    .update({ role: editFormData.role })
+                    .eq('id', editingEmployee.id)
+
+                if (profileError) throw profileError
+            }
+
+            alert('Employee updated successfully!')
+            setShowEditModal(false)
+            setEditingEmployee(null)
+            loadEmployees()
+        } catch (err: unknown) {
+            const error = err as Error
+            console.error('Error updating employee:', error)
+            alert('Error: ' + error.message)
+        } finally {
+            setSaving(false)
+        }
+    }
 
     useEffect(() => {
         loadEmployees()
@@ -30,7 +105,7 @@ export default function EmployeesPage() {
     async function loadEmployees() {
         setLoading(true)
         try {
-            const supabase = createClient()
+            const supabase = createUntypedClient()
             let query = supabase
                 .from('employees')
                 .select(`
@@ -39,7 +114,8 @@ export default function EmployeesPage() {
             email,
             full_name,
             role,
-            status
+            status,
+            email_confirmed_at
           )
         `)
                 .order('display_name')
@@ -77,11 +153,268 @@ export default function EmployeesPage() {
                         />
                         Show inactive
                     </label>
-                    <button className="btn-primary">
+                    <button className="btn-primary" onClick={() => setShowModal(true)}>
                         + Add Employee
                     </button>
                 </div>
             </div>
+
+            {/* Add Employee Modal */}
+            {showModal && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md mx-4 p-6">
+                        <h2 className="text-xl font-bold mb-4">Add New Employee</h2>
+                        <form onSubmit={async (e) => {
+                            e.preventDefault()
+                            setSaving(true)
+                            try {
+                                const supabase = createUntypedClient()
+
+                                // Create auth user
+                                const { data: authData, error: authError } = await supabase.auth.signUp({
+                                    email: formData.email,
+                                    password: formData.password,
+                                    options: {
+                                        data: {
+                                            full_name: formData.full_name,
+                                            role: formData.role
+                                        }
+                                    }
+                                })
+
+                                if (authError) throw authError
+                                if (!authData.user) throw new Error('User not created')
+
+                                const userId = authData.user.id
+
+                                // Create profile
+                                const { error: profileError } = await supabase
+                                    .from('profiles')
+                                    .insert({
+                                        id: userId,
+                                        email: formData.email,
+                                        full_name: formData.full_name,
+                                        role: formData.role,
+                                        status: 'active'
+                                    })
+
+                                if (profileError) throw profileError
+
+                                // Create employee
+                                const { error: empError } = await supabase
+                                    .from('employees')
+                                    .insert({
+                                        id: userId,
+                                        display_name: formData.display_name || formData.full_name,
+                                        position: formData.position,
+                                        shift_type: formData.shift_type,
+                                        is_active: true
+                                    })
+
+                                if (empError) throw empError
+
+                                alert('Employee added successfully!')
+                                setShowModal(false)
+                                setFormData({
+                                    email: '',
+                                    password: '',
+                                    full_name: '',
+                                    display_name: '',
+                                    position: '',
+                                    shift_type: 'full-time',
+                                    role: 'employee'
+                                })
+                                loadEmployees()
+                            } catch (err: unknown) {
+                                const error = err as Error
+                                console.error('Error adding employee:', error)
+                                alert('Error: ' + error.message)
+                            } finally {
+                                setSaving(false)
+                            }
+                        }} className="space-y-4">
+                            <div>
+                                <label className="label">Email *</label>
+                                <input
+                                    type="email"
+                                    required
+                                    className="input"
+                                    value={formData.email}
+                                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                                />
+                            </div>
+                            <div>
+                                <label className="label">Password *</label>
+                                <input
+                                    type="password"
+                                    required
+                                    minLength={6}
+                                    className="input"
+                                    value={formData.password}
+                                    onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                                />
+                            </div>
+                            <div>
+                                <label className="label">Full Name *</label>
+                                <input
+                                    type="text"
+                                    required
+                                    className="input"
+                                    value={formData.full_name}
+                                    onChange={(e) => setFormData({ ...formData, full_name: e.target.value })}
+                                />
+                            </div>
+                            <div>
+                                <label className="label">Display Name</label>
+                                <input
+                                    type="text"
+                                    className="input"
+                                    placeholder="Short name for UI"
+                                    value={formData.display_name}
+                                    onChange={(e) => setFormData({ ...formData, display_name: e.target.value })}
+                                />
+                            </div>
+                            <div>
+                                <label className="label">Position</label>
+                                <input
+                                    type="text"
+                                    className="input"
+                                    placeholder="e.g., Floor Staff, Manager"
+                                    value={formData.position}
+                                    onChange={(e) => setFormData({ ...formData, position: e.target.value })}
+                                />
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="label">Shift Type</label>
+                                    <select
+                                        className="input"
+                                        value={formData.shift_type}
+                                        onChange={(e) => setFormData({ ...formData, shift_type: e.target.value })}
+                                    >
+                                        <option value="full-time">Full-time</option>
+                                        <option value="part-time">Part-time</option>
+                                        <option value="weekend">Weekend</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="label">Role</label>
+                                    <select
+                                        className="input"
+                                        value={formData.role}
+                                        onChange={(e) => setFormData({ ...formData, role: e.target.value })}
+                                    >
+                                        <option value="employee">Employee</option>
+                                        <option value="admin">Admin</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="flex gap-3 pt-4">
+                                <button
+                                    type="button"
+                                    className="btn-secondary flex-1"
+                                    onClick={() => setShowModal(false)}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="btn-primary flex-1"
+                                    disabled={saving}
+                                >
+                                    {saving ? 'Adding...' : 'Add Employee'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Edit Employee Modal */}
+            {showEditModal && editingEmployee && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md mx-4 p-6">
+                        <h2 className="text-xl font-bold mb-4">Edit Employee</h2>
+                        <p className="text-sm text-muted-foreground mb-4">
+                            {editingEmployee.profiles?.full_name} ({editingEmployee.profiles?.email})
+                        </p>
+                        <form onSubmit={handleEditSubmit} className="space-y-4">
+                            <div>
+                                <label className="label">Display Name</label>
+                                <input
+                                    type="text"
+                                    className="input"
+                                    placeholder="Short name for UI"
+                                    value={editFormData.display_name}
+                                    onChange={(e) => setEditFormData({ ...editFormData, display_name: e.target.value })}
+                                />
+                            </div>
+                            <div>
+                                <label className="label">Position</label>
+                                <input
+                                    type="text"
+                                    className="input"
+                                    placeholder="e.g., Floor Staff, Manager"
+                                    value={editFormData.position}
+                                    onChange={(e) => setEditFormData({ ...editFormData, position: e.target.value })}
+                                />
+                            </div>
+                            <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label className="label">Shift Type</label>
+                                    <select
+                                        className="input"
+                                        value={editFormData.shift_type}
+                                        onChange={(e) => setEditFormData({ ...editFormData, shift_type: e.target.value })}
+                                    >
+                                        <option value="full-time">Full-time</option>
+                                        <option value="part-time">Part-time</option>
+                                        <option value="weekend">Weekend</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="label">Role</label>
+                                    <select
+                                        className="input"
+                                        value={editFormData.role}
+                                        onChange={(e) => setEditFormData({ ...editFormData, role: e.target.value })}
+                                    >
+                                        <option value="employee">Employee</option>
+                                        <option value="admin">Admin</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div>
+                                <label className="flex items-center gap-2">
+                                    <input
+                                        type="checkbox"
+                                        checked={editFormData.is_active}
+                                        onChange={(e) => setEditFormData({ ...editFormData, is_active: e.target.checked })}
+                                        className="rounded border-gray-300"
+                                    />
+                                    <span className="text-sm">Active</span>
+                                </label>
+                            </div>
+                            <div className="flex gap-3 pt-4">
+                                <button
+                                    type="button"
+                                    className="btn-secondary flex-1"
+                                    onClick={() => { setShowEditModal(false); setEditingEmployee(null); }}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="submit"
+                                    className="btn-primary flex-1"
+                                    disabled={saving}
+                                >
+                                    {saving ? 'Saving...' : 'Save Changes'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
 
             {loading ? (
                 <div className="space-y-4">
@@ -103,6 +436,7 @@ export default function EmployeesPage() {
                                     <th className="text-left p-4 font-medium">Position</th>
                                     <th className="text-left p-4 font-medium">Shift Type</th>
                                     <th className="text-left p-4 font-medium">Role</th>
+                                    <th className="text-left p-4 font-medium">Email Verified</th>
                                     <th className="text-left p-4 font-medium">Status</th>
                                     <th className="text-left p-4 font-medium">Actions</th>
                                 </tr>
@@ -129,12 +463,22 @@ export default function EmployeesPage() {
                                             </span>
                                         </td>
                                         <td className="p-4">
+                                            <span className={`badge ${emp.profiles?.email_confirmed_at ? 'badge-success' : 'badge-warning'}`}>
+                                                {emp.profiles?.email_confirmed_at ? 'Yes' : 'No'}
+                                            </span>
+                                        </td>
+                                        <td className="p-4">
                                             <span className={`badge ${emp.is_active ? 'badge-success' : 'badge-secondary'}`}>
                                                 {emp.is_active ? 'Active' : 'Inactive'}
                                             </span>
                                         </td>
                                         <td className="p-4">
-                                            <button className="btn-ghost btn-sm">Edit</button>
+                                            <button
+                                                className="btn-ghost btn-sm"
+                                                onClick={() => openEditModal(emp)}
+                                            >
+                                                Edit
+                                            </button>
                                         </td>
                                     </tr>
                                 ))}
