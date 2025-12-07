@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatDate } from '@/lib/utils'
@@ -12,6 +12,8 @@ interface TaskInstance {
     status: string
     completed_at: string | null
     notes: string | null
+    photo_url: string | null
+    video_url: string | null
     tasks: {
         title: string
         description: string | null
@@ -24,15 +26,25 @@ interface TaskInstance {
 }
 
 export default function EmployeeTasksPage() {
-    const { } = useAuth() // Using auth for context check
+    const { user } = useAuth()
     const [tasks, setTasks] = useState<TaskInstance[]>([])
     const [loading, setLoading] = useState(true)
     const [filter, setFilter] = useState<'all' | 'pending' | 'completed'>('all')
     const [selectedTask, setSelectedTask] = useState<TaskInstance | null>(null)
+    const [viewingTask, setViewingTask] = useState<TaskInstance | null>(null)
+    const [editingTask, setEditingTask] = useState<TaskInstance | null>(null)
 
     // Form state for completing task
     const [notes, setNotes] = useState('')
+    const [photoFile, setPhotoFile] = useState<File | null>(null)
+    const [videoFile, setVideoFile] = useState<File | null>(null)
+    const [photoPreview, setPhotoPreview] = useState<string | null>(null)
+    const [videoPreview, setVideoPreview] = useState<string | null>(null)
     const [completing, setCompleting] = useState(false)
+    const [uploadProgress, setUploadProgress] = useState<string>('')
+
+    const photoInputRef = useRef<HTMLInputElement>(null)
+    const videoInputRef = useRef<HTMLInputElement>(null)
 
     const loadTasks = useCallback(async () => {
         setLoading(true)
@@ -75,14 +87,191 @@ export default function EmployeeTasksPage() {
         loadTasks()
     }, [loadTasks])
 
+    // Handle photo file selection
+    function handlePhotoChange(e: React.ChangeEvent<HTMLInputElement>) {
+        const file = e.target.files?.[0]
+        if (file) {
+            if (!file.type.startsWith('image/')) {
+                alert('Please select an image file')
+                return
+            }
+            if (file.size > 10 * 1024 * 1024) { // 10MB limit
+                alert('Image must be less than 10MB')
+                return
+            }
+            setPhotoFile(file)
+            setPhotoPreview(URL.createObjectURL(file))
+        }
+    }
+
+    // Handle video file selection
+    function handleVideoChange(e: React.ChangeEvent<HTMLInputElement>) {
+        const file = e.target.files?.[0]
+        if (file) {
+            if (!file.type.startsWith('video/')) {
+                alert('Please select a video file')
+                return
+            }
+            if (file.size > 100 * 1024 * 1024) { // 100MB limit
+                alert('Video must be less than 100MB')
+                return
+            }
+            setVideoFile(file)
+            setVideoPreview(URL.createObjectURL(file))
+        }
+    }
+
+    // Upload file to Supabase storage
+    async function uploadFile(file: File, type: 'photo' | 'video', taskId: string): Promise<string | null> {
+        const supabase = createUntypedClient()
+        const fileExt = file.name.split('.').pop()
+        const fileName = `${taskId}_${type}_${Date.now()}.${fileExt}`
+        // Path structure: user_id/filename (to match storage policy)
+        const filePath = `${user?.id}/${fileName}`
+
+        setUploadProgress(`Uploading ${type}...`)
+
+        const { error: uploadError } = await supabase.storage
+            .from('task-media')
+            .upload(filePath, file, {
+                cacheControl: '3600',
+                upsert: false
+            })
+
+        if (uploadError) {
+            console.error(`Error uploading ${type}:`, uploadError)
+            // If bucket doesn't exist, try to continue without upload
+            if (uploadError.message?.includes('Bucket not found')) {
+                console.warn('Storage bucket not configured - skipping upload')
+                return null
+            }
+            throw uploadError
+        }
+
+        const { data: { publicUrl } } = supabase.storage
+            .from('task-media')
+            .getPublicUrl(filePath)
+
+        return publicUrl
+    }
+
+    function resetForm() {
+        setNotes('')
+        setPhotoFile(null)
+        setVideoFile(null)
+        setPhotoPreview(null)
+        setVideoPreview(null)
+        setUploadProgress('')
+    }
+
+    // Open edit modal with current values
+    function openEditModal(task: TaskInstance) {
+        setEditingTask(task)
+        setNotes(task.notes || '')
+        setPhotoPreview(task.photo_url)
+        setVideoPreview(task.video_url)
+        setViewingTask(null)
+    }
+
+    // Update completed task submission
+    async function updateSubmission(taskInstance: TaskInstance) {
+        if (taskInstance.tasks?.requires_notes && !notes.trim()) {
+            alert('Notes are required for this task')
+            return
+        }
+
+        setCompleting(true)
+        try {
+            let photoUrl: string | null = taskInstance.photo_url
+            let videoUrl: string | null = taskInstance.video_url
+
+            // Upload new photo if provided
+            if (photoFile) {
+                try {
+                    const newPhotoUrl = await uploadFile(photoFile, 'photo', taskInstance.id)
+                    if (newPhotoUrl) photoUrl = newPhotoUrl
+                } catch (err) {
+                    console.warn('Photo upload failed:', err)
+                }
+            }
+
+            // Upload new video if provided
+            if (videoFile) {
+                try {
+                    const newVideoUrl = await uploadFile(videoFile, 'video', taskInstance.id)
+                    if (newVideoUrl) videoUrl = newVideoUrl
+                } catch (err) {
+                    console.warn('Video upload failed:', err)
+                }
+            }
+
+            setUploadProgress('Saving changes...')
+
+            const supabase = createUntypedClient()
+            const { error } = await supabase
+                .from('task_instances')
+                .update({
+                    notes: notes || null,
+                    photo_url: photoUrl,
+                    video_url: videoUrl,
+                })
+                .eq('id', taskInstance.id)
+
+            if (error) throw error
+            await loadTasks()
+            setEditingTask(null)
+            resetForm()
+            alert('Submission updated successfully!')
+        } catch (err) {
+            console.error('Error updating submission:', err)
+            alert('Failed to update submission')
+        } finally {
+            setCompleting(false)
+            setUploadProgress('')
+        }
+    }
+
     async function completeTask(taskInstance: TaskInstance) {
         if (taskInstance.tasks?.requires_notes && !notes.trim()) {
             alert('Please add notes before completing this task')
             return
         }
 
+        if (taskInstance.tasks?.requires_photo && !photoFile) {
+            alert('Please upload a photo before completing this task')
+            return
+        }
+
+        if (taskInstance.tasks?.requires_video && !videoFile) {
+            alert('Please upload a video before completing this task')
+            return
+        }
+
         setCompleting(true)
         try {
+            let photoUrl: string | null = null
+            let videoUrl: string | null = null
+
+            // Upload photo if provided
+            if (photoFile) {
+                try {
+                    photoUrl = await uploadFile(photoFile, 'photo', taskInstance.id)
+                } catch (err) {
+                    console.warn('Photo upload failed, continuing without photo:', err)
+                }
+            }
+
+            // Upload video if provided
+            if (videoFile) {
+                try {
+                    videoUrl = await uploadFile(videoFile, 'video', taskInstance.id)
+                } catch (err) {
+                    console.warn('Video upload failed, continuing without video:', err)
+                }
+            }
+
+            setUploadProgress('Saving task...')
+
             const supabase = createUntypedClient()
             const { error } = await supabase
                 .from('task_instances')
@@ -90,18 +279,22 @@ export default function EmployeeTasksPage() {
                     status: 'completed',
                     completed_at: new Date().toISOString(),
                     notes: notes || null,
+                    photo_url: photoUrl,
+                    video_url: videoUrl,
                 })
                 .eq('id', taskInstance.id)
 
             if (error) throw error
             await loadTasks()
             setSelectedTask(null)
-            setNotes('')
+            resetForm()
+            alert('Task completed successfully!')
         } catch (err) {
             console.error('Error completing task:', err)
             alert('Failed to complete task')
         } finally {
             setCompleting(false)
+            setUploadProgress('')
         }
     }
 
@@ -229,6 +422,14 @@ export default function EmployeeTasksPage() {
                                                 Complete
                                             </button>
                                         )}
+                                        {task.status === 'completed' && (
+                                            <button
+                                                onClick={() => setViewingTask(task)}
+                                                className="btn-outline btn-sm"
+                                            >
+                                                View Details
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
                             </div>
@@ -275,14 +476,100 @@ export default function EmployeeTasksPage() {
                                     />
                                 </div>
                             )}
-                            {selectedTask.tasks?.requires_photo && (
-                                <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg text-sm text-yellow-800 dark:text-yellow-200">
-                                    📷 This task requires a photo (upload feature coming soon)
-                                </div>
-                            )}
-                            {selectedTask.tasks?.requires_video && (
-                                <div className="p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg text-sm text-yellow-800 dark:text-yellow-200">
-                                    🎥 This task requires a video (upload feature coming soon)
+
+                            {/* Photo Upload */}
+                            <div>
+                                <label className="label mb-2 block">
+                                    📷 Photo {selectedTask.tasks?.requires_photo && <span className="text-destructive">*</span>}
+                                    {!selectedTask.tasks?.requires_photo && <span className="text-muted-foreground">(optional)</span>}
+                                </label>
+                                <input
+                                    ref={photoInputRef}
+                                    type="file"
+                                    accept="image/*"
+                                    capture="environment"
+                                    onChange={handlePhotoChange}
+                                    className="hidden"
+                                />
+                                {photoPreview ? (
+                                    <div className="relative">
+                                        <img
+                                            src={photoPreview}
+                                            alt="Photo preview"
+                                            className="w-full h-40 object-cover rounded-lg border"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setPhotoFile(null)
+                                                setPhotoPreview(null)
+                                                if (photoInputRef.current) photoInputRef.current.value = ''
+                                            }}
+                                            className="absolute top-2 right-2 bg-destructive text-white rounded-full w-6 h-6 flex items-center justify-center text-sm"
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => photoInputRef.current?.click()}
+                                        className="w-full h-24 border-2 border-dashed border-muted-foreground/25 rounded-lg hover:border-primary/50 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground"
+                                    >
+                                        <span className="text-2xl">📷</span>
+                                        <span className="text-sm">Click to upload photo</span>
+                                    </button>
+                                )}
+                            </div>
+
+                            {/* Video Upload */}
+                            <div>
+                                <label className="label mb-2 block">
+                                    🎥 Video {selectedTask.tasks?.requires_video && <span className="text-destructive">*</span>}
+                                    {!selectedTask.tasks?.requires_video && <span className="text-muted-foreground">(optional)</span>}
+                                </label>
+                                <input
+                                    ref={videoInputRef}
+                                    type="file"
+                                    accept="video/*"
+                                    capture="environment"
+                                    onChange={handleVideoChange}
+                                    className="hidden"
+                                />
+                                {videoPreview ? (
+                                    <div className="relative">
+                                        <video
+                                            src={videoPreview}
+                                            className="w-full h-40 object-cover rounded-lg border"
+                                            controls
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setVideoFile(null)
+                                                setVideoPreview(null)
+                                                if (videoInputRef.current) videoInputRef.current.value = ''
+                                            }}
+                                            className="absolute top-2 right-2 bg-destructive text-white rounded-full w-6 h-6 flex items-center justify-center text-sm"
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => videoInputRef.current?.click()}
+                                        className="w-full h-24 border-2 border-dashed border-muted-foreground/25 rounded-lg hover:border-primary/50 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground"
+                                    >
+                                        <span className="text-2xl">🎥</span>
+                                        <span className="text-sm">Click to upload video</span>
+                                    </button>
+                                )}
+                            </div>
+
+                            {uploadProgress && (
+                                <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-sm text-blue-800 dark:text-blue-200 text-center">
+                                    ⏳ {uploadProgress}
                                 </div>
                             )}
                         </div>
@@ -290,9 +577,10 @@ export default function EmployeeTasksPage() {
                             <button
                                 onClick={() => {
                                     setSelectedTask(null)
-                                    setNotes('')
+                                    resetForm()
                                 }}
                                 className="btn-outline"
+                                disabled={completing}
                             >
                                 Cancel
                             </button>
@@ -302,6 +590,245 @@ export default function EmployeeTasksPage() {
                                 disabled={completing}
                             >
                                 {completing ? 'Completing...' : 'Mark Complete'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* View Submission Modal */}
+            {viewingTask && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div
+                        className="absolute inset-0 bg-black/50"
+                        onClick={() => setViewingTask(null)}
+                    ></div>
+                    <div className="relative card w-full max-w-lg max-h-[90vh] overflow-y-auto">
+                        <div className="card-header">
+                            <h2 className="card-title">Task Submission</h2>
+                            <p className="card-description">{viewingTask.tasks?.title}</p>
+                        </div>
+                        <div className="card-content space-y-4">
+                            <div className="grid grid-cols-2 gap-4 text-sm">
+                                <div>
+                                    <p className="text-muted-foreground">Scheduled Date</p>
+                                    <p className="font-medium">{formatDate(viewingTask.scheduled_date)}</p>
+                                </div>
+                                <div>
+                                    <p className="text-muted-foreground">Completed At</p>
+                                    <p className="font-medium">
+                                        {viewingTask.completed_at
+                                            ? new Date(viewingTask.completed_at).toLocaleString()
+                                            : 'N/A'}
+                                    </p>
+                                </div>
+                            </div>
+
+                            {viewingTask.notes && (
+                                <div>
+                                    <p className="text-sm text-muted-foreground mb-1">📝 Notes</p>
+                                    <p className="text-sm bg-muted p-3 rounded-lg">{viewingTask.notes}</p>
+                                </div>
+                            )}
+
+                            {viewingTask.photo_url && (
+                                <div>
+                                    <p className="text-sm text-muted-foreground mb-2">📷 Photo</p>
+                                    <a
+                                        href={viewingTask.photo_url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="block"
+                                    >
+                                        <img
+                                            src={viewingTask.photo_url}
+                                            alt="Task photo"
+                                            className="w-full max-h-64 object-contain rounded-lg border cursor-pointer hover:opacity-80 transition-opacity"
+                                        />
+                                    </a>
+                                    <p className="text-xs text-muted-foreground mt-1">Click to open full size</p>
+                                </div>
+                            )}
+
+                            {viewingTask.video_url && (
+                                <div>
+                                    <p className="text-sm text-muted-foreground mb-2">🎥 Video</p>
+                                    <video
+                                        src={viewingTask.video_url}
+                                        className="w-full max-h-64 rounded-lg border"
+                                        controls
+                                    />
+                                </div>
+                            )}
+
+                            {!viewingTask.notes && !viewingTask.photo_url && !viewingTask.video_url && (
+                                <p className="text-sm text-muted-foreground italic">
+                                    No additional submission details
+                                </p>
+                            )}
+                        </div>
+                        <div className="card-footer gap-3 justify-end">
+                            <button
+                                onClick={() => setViewingTask(null)}
+                                className="btn-outline"
+                            >
+                                Close
+                            </button>
+                            <button
+                                onClick={() => openEditModal(viewingTask)}
+                                className="btn-primary"
+                            >
+                                ✏️ Edit Submission
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Edit Submission Modal */}
+            {editingTask && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                    <div
+                        className="absolute inset-0 bg-black/50"
+                        onClick={() => {
+                            setEditingTask(null)
+                            resetForm()
+                        }}
+                    ></div>
+                    <div className="relative card w-full max-w-md max-h-[90vh] overflow-y-auto">
+                        <div className="card-header">
+                            <h2 className="card-title">Edit Submission</h2>
+                            <p className="card-description">{editingTask.tasks?.title}</p>
+                        </div>
+                        <div className="card-content space-y-4">
+                            {/* Notes */}
+                            <div>
+                                <label className="label mb-2 block">
+                                    📝 Notes {editingTask.tasks?.requires_notes && <span className="text-destructive">*</span>}
+                                </label>
+                                <textarea
+                                    className="input min-h-[100px]"
+                                    value={notes}
+                                    onChange={(e) => setNotes(e.target.value)}
+                                    placeholder="Add your notes..."
+                                />
+                            </div>
+
+                            {/* Photo Upload/Replace */}
+                            <div>
+                                <label className="label mb-2 block">
+                                    📷 Photo {editingTask.tasks?.requires_photo && <span className="text-destructive">*</span>}
+                                </label>
+                                <input
+                                    ref={photoInputRef}
+                                    type="file"
+                                    accept="image/*"
+                                    capture="environment"
+                                    onChange={handlePhotoChange}
+                                    className="hidden"
+                                />
+                                {(photoPreview || photoFile) ? (
+                                    <div className="relative">
+                                        <img
+                                            src={photoFile ? URL.createObjectURL(photoFile) : photoPreview || ''}
+                                            alt="Photo preview"
+                                            className="w-full h-40 object-cover rounded-lg border"
+                                        />
+                                        <div className="absolute top-2 right-2 flex gap-1">
+                                            <button
+                                                type="button"
+                                                onClick={() => photoInputRef.current?.click()}
+                                                className="bg-primary text-white rounded-full w-6 h-6 flex items-center justify-center text-sm"
+                                                title="Replace photo"
+                                            >
+                                                🔄
+                                            </button>
+                                        </div>
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                            {photoFile ? '📌 New photo selected' : '📁 Current photo'}
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => photoInputRef.current?.click()}
+                                        className="w-full h-24 border-2 border-dashed border-muted-foreground/25 rounded-lg hover:border-primary/50 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground"
+                                    >
+                                        <span className="text-2xl">📷</span>
+                                        <span className="text-sm">Click to upload photo</span>
+                                    </button>
+                                )}
+                            </div>
+
+                            {/* Video Upload/Replace */}
+                            <div>
+                                <label className="label mb-2 block">
+                                    🎥 Video {editingTask.tasks?.requires_video && <span className="text-destructive">*</span>}
+                                </label>
+                                <input
+                                    ref={videoInputRef}
+                                    type="file"
+                                    accept="video/*"
+                                    capture="environment"
+                                    onChange={handleVideoChange}
+                                    className="hidden"
+                                />
+                                {(videoPreview || videoFile) ? (
+                                    <div className="relative">
+                                        <video
+                                            src={videoFile ? URL.createObjectURL(videoFile) : videoPreview || ''}
+                                            className="w-full h-40 object-cover rounded-lg border"
+                                            controls
+                                        />
+                                        <div className="absolute top-2 right-2 flex gap-1">
+                                            <button
+                                                type="button"
+                                                onClick={() => videoInputRef.current?.click()}
+                                                className="bg-primary text-white rounded-full w-6 h-6 flex items-center justify-center text-sm"
+                                                title="Replace video"
+                                            >
+                                                🔄
+                                            </button>
+                                        </div>
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                            {videoFile ? '📌 New video selected' : '📁 Current video'}
+                                        </p>
+                                    </div>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={() => videoInputRef.current?.click()}
+                                        className="w-full h-24 border-2 border-dashed border-muted-foreground/25 rounded-lg hover:border-primary/50 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground"
+                                    >
+                                        <span className="text-2xl">🎥</span>
+                                        <span className="text-sm">Click to upload video</span>
+                                    </button>
+                                )}
+                            </div>
+
+                            {uploadProgress && (
+                                <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-sm text-blue-800 dark:text-blue-200 text-center">
+                                    ⏳ {uploadProgress}
+                                </div>
+                            )}
+                        </div>
+                        <div className="card-footer gap-3 justify-end">
+                            <button
+                                onClick={() => {
+                                    setEditingTask(null)
+                                    resetForm()
+                                }}
+                                className="btn-outline"
+                                disabled={completing}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => updateSubmission(editingTask)}
+                                className="btn-primary"
+                                disabled={completing}
+                            >
+                                {completing ? 'Saving...' : 'Save Changes'}
                             </button>
                         </div>
                     </div>

@@ -18,7 +18,7 @@ const adminNavItems = [
 export default function AdminLayout({ children }: { children: ReactNode }) {
     const pathname = usePathname()
     const router = useRouter()
-    const { profile, signOut, isLoading } = useAuth()
+    const { profile, signOut, isLoading, user } = useAuth()
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [signingOut, setSigningOut] = useState(false)
     const [loadingTimeout, setLoadingTimeout] = useState(false)
@@ -32,6 +32,13 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
         }, 5000) // 5 second timeout
         return () => clearTimeout(timer)
     }, [isLoading])
+
+    // Redirect to login if not authenticated
+    useEffect(() => {
+        if (!isLoading && !user) {
+            router.replace('/login')
+        }
+    }, [isLoading, user, router])
 
     const handleSignOut = () => {
         if (signingOut) return
@@ -56,6 +63,18 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
         return (
             <div className="min-h-screen flex items-center justify-center">
                 <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
+            </div>
+        )
+    }
+
+    // Don't render layout if not authenticated
+    if (!user) {
+        return (
+            <div className="min-h-screen flex items-center justify-center">
+                <div className="text-center">
+                    <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary mx-auto mb-4"></div>
+                    <p className="text-muted-foreground">Redirecting to login...</p>
+                </div>
             </div>
         )
     }

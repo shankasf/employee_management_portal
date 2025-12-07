@@ -25,6 +25,9 @@ export async function POST() {
     );
 
     await supabase.auth.signOut();
+
+    // Clear the cached user role cookie
+    response.cookies.delete("user_role");
   } catch (err) {
     console.error("Server signout error:", err);
     response = NextResponse.json(

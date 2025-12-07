@@ -40,33 +40,137 @@ interface PolicyStrip {
 }
 
 export default function EmployeeDashboard() {
-    const { employee } = useAuth()
+    const { employee, user } = useAuth()
     const [clockedIn, setClockedIn] = useState<OpenAttendance | null>(null)
     const [tasks, setTasks] = useState<TodayTask[]>([])
     const [events, setEvents] = useState<UpcomingEvent[]>([])
     const [policies, setPolicies] = useState<PolicyStrip[]>([])
     const [loading, setLoading] = useState(true)
     const [clockLoading, setClockLoading] = useState(false)
+    const [error, setError] = useState<string | null>(null)
 
     const loadData = useCallback(async () => {
+        if (!user?.id) {
+            setLoading(false)
+            return
+        }
+
         const supabase = createUntypedClient()
 
+        // Set a timeout to prevent infinite loading
+        const timeout = setTimeout(() => {
+            console.warn('Dashboard load timeout - showing with available data')
+            setLoading(false)
+        }, 5000)
+
         try {
-            // Check if clocked in
-            const { data: attendance } = await supabase.rpc('get_open_attendance')
-            if (attendance && attendance.length > 0) {
-                setClockedIn(attendance[0])
-            } else {
-                setClockedIn(null)
+            // Check if clocked in - use direct query with user id
+            try {
+                const { data: attendance } = await supabase.rpc('get_open_attendance')
+                if (attendance && attendance.length > 0) {
+                    setClockedIn(attendance[0])
+                } else {
+                    setClockedIn(null)
+                }
+            } catch (err) {
+                console.warn('RPC get_open_attendance not available, using direct query:', err)
+                // Fallback: direct query with user filter
+                const { data: attendanceData } = await supabase
+                    .from('attendance_logs')
+                    .select('id, clock_in')
+                    .eq('employee_id', user.id)
+                    .is('clock_out', null)
+                    .order('clock_in', { ascending: false })
+                    .limit(1)
+                setClockedIn(attendanceData?.[0] || null)
             }
 
-            // Get today's tasks
-            const { data: tasksData } = await supabase.rpc('get_today_tasks')
-            setTasks(tasksData || [])
+            // Get today's tasks - use direct query with user id
+            try {
+                const { data: tasksData } = await supabase.rpc('get_today_tasks')
+                setTasks(tasksData || [])
+            } catch (err) {
+                console.warn('RPC get_today_tasks not available, using direct query:', err)
+                // Fallback: direct query for today's tasks
+                const today = new Date().toISOString().split('T')[0]
+                const { data: tasksData } = await supabase
+                    .from('task_instances')
+                    .select(`
+                        id,
+                        task_id,
+                        status,
+                        tasks (
+                            title,
+                            description,
+                            location,
+                            cutoff_time,
+                            requires_photo,
+                            requires_video,
+                            requires_notes
+                        )
+                    `)
+                    .eq('employee_id', user.id)
+                    .eq('scheduled_date', today)
+                    .limit(10)
 
-            // Get upcoming events
-            const { data: eventsData } = await supabase.rpc('get_my_upcoming_events', { p_limit: 5 })
-            setEvents(eventsData || [])
+                const formattedTasks = (tasksData || []).map((t: unknown) => {
+                    const task = t as { id: string; task_id: string; status: string; tasks: { title: string; description: string | null; location: string | null; cutoff_time: string | null; requires_photo: boolean; requires_video: boolean; requires_notes: boolean } | null }
+                    return {
+                        id: task.id,
+                        task_id: task.task_id,
+                        title: task.tasks?.title || 'Unknown Task',
+                        description: task.tasks?.description || null,
+                        location: task.tasks?.location || null,
+                        status: task.status,
+                        cutoff_time: task.tasks?.cutoff_time || null,
+                        requires_photo: task.tasks?.requires_photo || false,
+                        requires_video: task.tasks?.requires_video || false,
+                        requires_notes: task.tasks?.requires_notes || false,
+                    }
+                })
+                setTasks(formattedTasks)
+            }
+
+            // Get upcoming events - use direct query with user id
+            try {
+                const { data: eventsData } = await supabase.rpc('get_my_upcoming_events', { p_limit: 5 })
+                setEvents(eventsData || [])
+            } catch (err) {
+                console.warn('RPC get_my_upcoming_events not available, using direct query:', err)
+                // Fallback: direct query - get events user is assigned to
+                const { data: assignmentsData } = await supabase
+                    .from('event_staff_assignments')
+                    .select(`
+                        role,
+                        events (
+                            id,
+                            title,
+                            start_time,
+                            end_time,
+                            room
+                        )
+                    `)
+                    .eq('employee_id', user.id)
+                    .limit(5)
+
+                const formattedEvents = (assignmentsData || [])
+                    .filter((a: unknown) => {
+                        const assignment = a as { events: { start_time: string } | null }
+                        return assignment.events && new Date(assignment.events.start_time) >= new Date()
+                    })
+                    .map((a: unknown) => {
+                        const assignment = a as { role: string | null; events: { id: string; title: string; start_time: string; end_time: string; room: string | null } }
+                        return {
+                            id: assignment.events.id,
+                            title: assignment.events.title,
+                            start_time: assignment.events.start_time,
+                            end_time: assignment.events.end_time,
+                            room: assignment.events.room,
+                            my_role: assignment.role
+                        }
+                    })
+                setEvents(formattedEvents)
+            }
 
             // Get active policies
             const { data: policiesData } = await supabase
@@ -76,23 +180,58 @@ export default function EmployeeDashboard() {
                 .order('created_at', { ascending: false })
                 .limit(5)
             setPolicies(policiesData || [])
+            setError(null)
         } catch (err) {
             console.error('Error loading dashboard:', err)
+            setError('Failed to load some dashboard data')
         } finally {
+            clearTimeout(timeout)
             setLoading(false)
         }
-    }, [])
+    }, [user?.id])
 
     useEffect(() => {
         loadData()
     }, [loadData])
 
     const handleClockIn = async () => {
+        if (!user?.id) {
+            alert('You must be logged in to clock in')
+            return
+        }
         setClockLoading(true)
         try {
             const supabase = createUntypedClient()
-            const { error } = await supabase.rpc('clock_in')
-            if (error) throw error
+
+            // Check if already clocked in
+            const { data: existing } = await supabase
+                .from('attendance_logs')
+                .select('id')
+                .eq('employee_id', user.id)
+                .is('clock_out', null)
+                .limit(1)
+
+            if (existing && existing.length > 0) {
+                alert('You are already clocked in')
+                await loadData()
+                return
+            }
+
+            // Try RPC first, fallback to direct insert
+            try {
+                const { error } = await supabase.rpc('clock_in')
+                if (error) throw error
+            } catch (rpcErr) {
+                console.warn('RPC clock_in not available, using direct insert:', rpcErr)
+                const { error } = await supabase
+                    .from('attendance_logs')
+                    .insert({
+                        employee_id: user.id,
+                        clock_in: new Date().toISOString()
+                    })
+                if (error) throw error
+            }
+
             await loadData()
         } catch (err) {
             console.error('Clock in error:', err)
@@ -103,11 +242,27 @@ export default function EmployeeDashboard() {
     }
 
     const handleClockOut = async () => {
+        if (!user?.id || !clockedIn) {
+            alert('You must be clocked in to clock out')
+            return
+        }
         setClockLoading(true)
         try {
             const supabase = createUntypedClient()
-            const { error } = await supabase.rpc('clock_out')
-            if (error) throw error
+
+            // Try RPC first, fallback to direct update
+            try {
+                const { error } = await supabase.rpc('clock_out')
+                if (error) throw error
+            } catch (rpcErr) {
+                console.warn('RPC clock_out not available, using direct update:', rpcErr)
+                const { error } = await supabase
+                    .from('attendance_logs')
+                    .update({ clock_out: new Date().toISOString() })
+                    .eq('id', clockedIn.id)
+                if (error) throw error
+            }
+
             await loadData()
         } catch (err) {
             console.error('Clock out error:', err)
@@ -134,6 +289,11 @@ export default function EmployeeDashboard() {
 
     return (
         <div className="space-y-6">
+            {error && (
+                <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg text-yellow-800 dark:text-yellow-200">
+                    ⚠️ {error}
+                </div>
+            )}
             <div>
                 <h1 className="text-3xl font-bold">
                     Hello, {employee?.display_name || 'Team Member'}! 👋

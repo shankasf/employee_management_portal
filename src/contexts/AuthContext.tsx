@@ -33,6 +33,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const supabase = createClient()
 
     const fetchProfile = async (userId: string) => {
+        const fetchTimeout = setTimeout(() => {
+            console.warn('Profile fetch timeout')
+        }, 3000)
+
         try {
             const db = createUntypedClient()
             const { data: profileData, error: profileError } = await db
@@ -62,6 +66,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
         } catch (err) {
             console.error('Error in fetchProfile:', err)
+        } finally {
+            clearTimeout(fetchTimeout)
         }
     }
 
@@ -73,6 +79,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         const initAuth = async () => {
+            // Add timeout to prevent infinite loading
+            const timeout = setTimeout(() => {
+                console.warn('Auth init timeout - proceeding without full profile')
+                setIsLoading(false)
+            }, 5000)
+
             try {
                 const { data: { session } } = await supabase.auth.getSession()
                 setSession(session)
@@ -84,6 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             } catch (error) {
                 console.error('Error initializing auth:', error)
             } finally {
+                clearTimeout(timeout)
                 setIsLoading(false)
             }
         }
