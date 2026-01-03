@@ -1,0 +1,36 @@
+# Dependencies
+node_modules
+npm-debug.log
+
+# Next.js build output
+.next
+out
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Environment (kept for reference, but typically should be excluded)
+# .env.local
+
+# Documentation
+README.md
+*.md
+
+# Supabase local
+.supabase

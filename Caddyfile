@@ -1,0 +1,32 @@
+# Caddy configuration for PlayFunia Employee Management
+# Access via http://72.62.162.219 (port 80)
+
+:80 {
+    # Reverse proxy to Next.js app
+    reverse_proxy app:3000
+
+    # Enable access logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # Enable compression
+    encode gzip zstd
+
+    # Health check endpoint
+    handle /health {
+        respond "OK" 200
+    }
+}
+
+# HTTPS configuration (uncomment when you have a domain)
+# yourdomain.com {
+#     reverse_proxy app:3000
+#     log {
+#         output stdout
+#         format console
+#     }
+#     encode gzip zstd
+# }
