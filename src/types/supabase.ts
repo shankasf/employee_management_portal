@@ -94,6 +94,7 @@ export type Database = {
           emergency_contact_name: string | null;
           emergency_contact_phone: string | null;
           hr_notes: string | null;
+          hourly_rate: number | null;
           created_at: string;
           updated_at: string;
         };
@@ -121,6 +122,7 @@ export type Database = {
           emergency_contact_name?: string | null;
           emergency_contact_phone?: string | null;
           hr_notes?: string | null;
+          hourly_rate?: number | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -148,6 +150,7 @@ export type Database = {
           emergency_contact_name?: string | null;
           emergency_contact_phone?: string | null;
           hr_notes?: string | null;
+          hourly_rate?: number | null;
           created_at?: string;
           updated_at?: string;
         };

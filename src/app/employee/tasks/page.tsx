@@ -51,6 +51,10 @@ export default function EmployeeTasksPage() {
     const videoInputRef = useRef<HTMLInputElement>(null)
 
     const loadTasks = useCallback(async () => {
+        if (!user?.id) {
+            setLoading(false)
+            return
+        }
         setLoading(true)
         try {
             const supabase = createUntypedClient()
@@ -68,6 +72,7 @@ export default function EmployeeTasksPage() {
             requires_notes
           )
         `)
+                .eq('employee_id', user.id)
                 .order('scheduled_date', { ascending: false })
                 .limit(50)
 
@@ -85,7 +90,7 @@ export default function EmployeeTasksPage() {
         } finally {
             setLoading(false)
         }
-    }, [filter])
+    }, [filter, user?.id])
 
     useEffect(() => {
         loadTasks()

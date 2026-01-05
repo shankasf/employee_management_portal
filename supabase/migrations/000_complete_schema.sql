@@ -831,5 +831,64 @@ SELECT p.id, COALESCE(p.full_name, split_part(p.email, '@', 1)), TRUE
 FROM profiles p WHERE NOT EXISTS (SELECT 1 FROM employees e WHERE e.id = p.id) ON CONFLICT (id) DO NOTHING;
 
 -- =====================================================
+-- PART 9: TIME CARD ENHANCEMENTS (Added January 2026)
+-- =====================================================
+
+-- Add hourly_rate to employees (optional per-employee override)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'hourly_rate') THEN
+        ALTER TABLE employees ADD COLUMN hourly_rate NUMERIC(10,2);
+    END IF;
+END $$;
+
+-- Add location tracking fields to attendance_logs
+DO $$
+BEGIN
+    -- Clock In location fields
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_lat') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_lat NUMERIC(10,7);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_lng') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_lng NUMERIC(10,7);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_accuracy') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_accuracy NUMERIC(10,2);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_location_status') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_location_status TEXT DEFAULT 'unknown';
+    END IF;
+
+    -- Clock Out location fields
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_lat') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_lat NUMERIC(10,7);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_lng') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_lng NUMERIC(10,7);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_accuracy') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_accuracy NUMERIC(10,2);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_location_status') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_location_status TEXT DEFAULT 'unknown';
+    END IF;
+
+    -- Break tracking
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'break_minutes') THEN
+        ALTER TABLE attendance_logs ADD COLUMN break_minutes INTEGER DEFAULT 0;
+    END IF;
+
+    -- Work type (regular, overtime, etc.)
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'work_type') THEN
+        ALTER TABLE attendance_logs ADD COLUMN work_type TEXT DEFAULT 'regular';
+    END IF;
+
+    -- Notes field
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'notes') THEN
+        ALTER TABLE attendance_logs ADD COLUMN notes TEXT;
+    END IF;
+END $$;
+
+-- =====================================================
 -- SCHEMA COMPLETE
 -- =====================================================

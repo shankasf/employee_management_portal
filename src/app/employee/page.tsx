@@ -4,6 +4,13 @@ import { useEffect, useState, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatTime, formatDateTime } from '@/lib/utils'
+import {
+    captureLocation,
+    checkLocationPermission,
+    requestLocationPermission,
+    getLocationInstructions,
+    type PermissionStatus
+} from '@/lib/geolocation'
 
 interface OpenAttendance {
     id: string
@@ -49,6 +56,42 @@ export default function EmployeeDashboard() {
     const [clockLoading, setClockLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
 
+    // Location permission state
+    const [locationPermission, setLocationPermission] = useState<PermissionStatus>('prompt')
+    const [showLocationPrompt, setShowLocationPrompt] = useState(false)
+    const [locationRequesting, setLocationRequesting] = useState(false)
+    const [lastLocationStatus, setLastLocationStatus] = useState<string | null>(null)
+
+    // Check location permission on mount
+    useEffect(() => {
+        checkLocationPermission().then(setLocationPermission)
+    }, [])
+
+    // Request location permission
+    const handleRequestPermission = useCallback(async () => {
+        setLocationRequesting(true)
+        try {
+            const status = await requestLocationPermission()
+            setLocationPermission(status)
+            if (status === 'granted') {
+                setShowLocationPrompt(false)
+            }
+        } finally {
+            setLocationRequesting(false)
+        }
+    }, [])
+
+    // Auto-trigger permission request when modal opens
+    useEffect(() => {
+        if (showLocationPrompt && locationPermission === 'prompt') {
+            // Small delay to show the modal first, then trigger permission
+            const timer = setTimeout(() => {
+                handleRequestPermission()
+            }, 500)
+            return () => clearTimeout(timer)
+        }
+    }, [showLocationPrompt, locationPermission, handleRequestPermission])
+
     const loadData = useCallback(async () => {
         if (!user?.id) {
             setLoading(false)
@@ -76,7 +119,6 @@ export default function EmployeeDashboard() {
                 }
             } catch (err) {
                 console.warn('RPC get_open_attendance failed, using direct query:', err)
-                // Fallback: direct query with user filter
                 const { data: attendanceData, error: queryError } = await supabase
                     .from('attendance_logs')
                     .select('id, clock_in')
@@ -93,13 +135,12 @@ export default function EmployeeDashboard() {
             }
             setClockedIn(clockedInData)
 
-            // Get today's tasks - use direct query with user id
+            // Get today's tasks
             try {
                 const { data: tasksData } = await supabase.rpc('get_today_tasks')
                 setTasks(tasksData || [])
             } catch (err) {
                 console.warn('RPC get_today_tasks not available, using direct query:', err)
-                // Fallback: direct query for today's tasks
                 const today = new Date().toISOString().split('T')[0]
                 const { data: tasksData } = await supabase
                     .from('task_instances')
@@ -139,13 +180,12 @@ export default function EmployeeDashboard() {
                 setTasks(formattedTasks)
             }
 
-            // Get upcoming events - use direct query with user id
+            // Get upcoming events
             try {
                 const { data: eventsData } = await supabase.rpc('get_my_upcoming_events', { p_limit: 5 })
                 setEvents(eventsData || [])
             } catch (err) {
                 console.warn('RPC get_my_upcoming_events not available, using direct query:', err)
-                // Fallback: direct query - get events user is assigned to
                 const { data: assignmentsData } = await supabase
                     .from('event_staff_assignments')
                     .select(`
@@ -205,14 +245,28 @@ export default function EmployeeDashboard() {
         } else if (!authLoading && !user) {
             setLoading(false)
         }
-    }, [authLoading, user?.id, loadData])
+    }, [authLoading, user, loadData])
 
+    // Handle clock in with location
     const handleClockIn = async () => {
         if (!user?.id) {
             alert('You must be logged in to clock in')
             return
         }
+
+        // Check if we need to request permission first
+        const currentPermission = await checkLocationPermission()
+        setLocationPermission(currentPermission)
+
+        if (currentPermission === 'prompt') {
+            // Show permission prompt first
+            setShowLocationPrompt(true)
+            return
+        }
+
         setClockLoading(true)
+        setLastLocationStatus(null)
+
         try {
             const supabase = createUntypedClient()
 
@@ -230,19 +284,28 @@ export default function EmployeeDashboard() {
                 return
             }
 
-            // Try RPC first, fallback to direct insert
-            try {
-                const { error } = await supabase.rpc('clock_in')
-                if (error) throw error
-            } catch (rpcErr) {
-                console.warn('RPC clock_in not available, using direct insert:', rpcErr)
-                const { error } = await supabase
-                    .from('attendance_logs')
-                    .insert({
-                        employee_id: user.id,
-                        clock_in: new Date().toISOString()
-                    })
-                if (error) throw error
+            // Capture location
+            const location = await captureLocation()
+            setLastLocationStatus(location.status)
+
+            // Insert with location data
+            const { error } = await supabase
+                .from('attendance_logs')
+                .insert({
+                    employee_id: user.id,
+                    clock_in: new Date().toISOString(),
+                    clock_in_lat: location.lat,
+                    clock_in_lng: location.lng,
+                    clock_in_accuracy: location.accuracy,
+                    clock_in_location_status: location.status,
+                })
+            if (error) throw error
+
+            // Update permission status after successful capture
+            if (location.status === 'captured') {
+                setLocationPermission('granted')
+            } else if (location.status === 'denied') {
+                setLocationPermission('denied')
             }
 
             await loadData()
@@ -254,57 +317,63 @@ export default function EmployeeDashboard() {
         }
     }
 
+    // Handle clock out with location
     const handleClockOut = async () => {
         if (!user?.id || !clockedIn) {
             alert('You must be clocked in to clock out')
             return
         }
+
+        // Check if we need to request permission first
+        const currentPermission = await checkLocationPermission()
+        setLocationPermission(currentPermission)
+
+        if (currentPermission === 'prompt') {
+            setShowLocationPrompt(true)
+            return
+        }
+
         setClockLoading(true)
+        setLastLocationStatus(null)
+
         try {
             const supabase = createUntypedClient()
             const clockOutTime = new Date().toISOString()
 
-            // Try RPC first, fallback to direct update
-            let success = false
-            try {
-                const { error } = await supabase.rpc('clock_out')
-                if (error) {
-                    console.error('RPC clock_out error:', error)
-                    throw error
-                }
-                success = true
-            } catch (rpcErr) {
-                console.warn('RPC clock_out failed, using direct update:', rpcErr)
+            // Capture location
+            const location = await captureLocation()
+            setLastLocationStatus(location.status)
+
+            // Direct update with location data
+            const { data, error } = await supabase
+                .from('attendance_logs')
+                .update({
+                    clock_out: clockOutTime,
+                    clock_out_lat: location.lat,
+                    clock_out_lng: location.lng,
+                    clock_out_accuracy: location.accuracy,
+                    clock_out_location_status: location.status,
+                    total_hours: null
+                })
+                .eq('id', clockedIn.id)
+                .select()
+                .single()
+
+            if (error) {
+                console.error('Clock out error:', error)
+                throw error
             }
 
-            // If RPC failed, use direct update
-            if (!success) {
-                const { data, error } = await supabase
+            // Calculate total_hours if trigger didn't
+            if (data && data.clock_in && !data.total_hours) {
+                const clockInTime = new Date(data.clock_in).getTime()
+                const clockOutTimeMs = new Date(clockOutTime).getTime()
+                const totalHours = (clockOutTimeMs - clockInTime) / (1000 * 60 * 60)
+
+                await supabase
                     .from('attendance_logs')
-                    .update({
-                        clock_out: clockOutTime,
-                        total_hours: null // Let the trigger compute this
-                    })
+                    .update({ total_hours: totalHours })
                     .eq('id', clockedIn.id)
-                    .select()
-                    .single()
-
-                if (error) {
-                    console.error('Direct update error:', error)
-                    throw error
-                }
-
-                // If trigger didn't compute total_hours, calculate it manually
-                if (data && data.clock_in && !data.total_hours) {
-                    const clockInTime = new Date(data.clock_in).getTime()
-                    const clockOutTimeMs = new Date(clockOutTime).getTime()
-                    const totalHours = (clockOutTimeMs - clockInTime) / (1000 * 60 * 60)
-
-                    await supabase
-                        .from('attendance_logs')
-                        .update({ total_hours: totalHours })
-                        .eq('id', clockedIn.id)
-                }
             }
 
             await loadData()
@@ -314,6 +383,16 @@ export default function EmployeeDashboard() {
             alert(`Failed to clock out: ${errorMessage}`)
         } finally {
             setClockLoading(false)
+        }
+    }
+
+    // Proceed with clock action after permission granted
+    const proceedAfterPermission = async () => {
+        setShowLocationPrompt(false)
+        if (clockedIn) {
+            await handleClockOut()
+        } else {
+            await handleClockIn()
         }
     }
 
@@ -334,11 +413,99 @@ export default function EmployeeDashboard() {
 
     return (
         <div className="space-y-4 sm:space-y-6">
+            {/* Location Permission Modal */}
+            {showLocationPrompt && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-card rounded-xl shadow-xl w-full max-w-md border">
+                        <div className="p-6">
+                            <div className="text-center mb-6">
+                                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
+                                    <svg className="w-8 h-8 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                </div>
+                                <h2 className="text-xl font-bold mb-2">Location Access Required</h2>
+                                <p className="text-muted-foreground text-sm">
+                                    To clock {clockedIn ? 'out' : 'in'}, we need to capture your location for attendance verification.
+                                </p>
+                            </div>
+
+                            {/* Browser-specific instructions */}
+                            <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                <p className="text-xs text-blue-700 dark:text-blue-300">
+                                    {getLocationInstructions()}
+                                </p>
+                            </div>
+
+                            {locationPermission === 'denied' && (
+                                <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                                    <p className="text-sm text-red-800 dark:text-red-200 font-medium mb-1">
+                                        Location access was denied
+                                    </p>
+                                    <p className="text-xs text-red-700 dark:text-red-300">
+                                        Please enable location in your browser settings, then try again.
+                                    </p>
+                                </div>
+                            )}
+
+                            <div className="space-y-3">
+                                {locationPermission !== 'granted' && (
+                                    <button
+                                        onClick={handleRequestPermission}
+                                        disabled={locationRequesting}
+                                        className="btn-primary w-full flex items-center justify-center gap-2"
+                                    >
+                                        {locationRequesting ? (
+                                            <>
+                                                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                                </svg>
+                                                Waiting for permission...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                                                </svg>
+                                                {locationPermission === 'denied' ? 'Try Again' : 'Allow Location Access'}
+                                            </>
+                                        )}
+                                    </button>
+                                )}
+
+                                {locationPermission === 'granted' && (
+                                    <button
+                                        onClick={proceedAfterPermission}
+                                        className="btn-primary w-full bg-green-600 hover:bg-green-700"
+                                    >
+                                        Continue to Clock {clockedIn ? 'Out' : 'In'}
+                                    </button>
+                                )}
+
+                                <button
+                                    onClick={() => setShowLocationPrompt(false)}
+                                    className="btn-secondary w-full"
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+
+                            <p className="text-xs text-muted-foreground text-center mt-4">
+                                Your location is only captured when you clock in or out.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {error && (
                 <div className="p-3 sm:p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg text-yellow-800 dark:text-yellow-200 text-sm">
                     ⚠️ {error}
                 </div>
             )}
+
             <div>
                 <h1 className="text-2xl sm:text-3xl font-bold">
                     Hello, {employee?.display_name || 'Team Member'}! 👋
@@ -366,21 +533,48 @@ export default function EmployeeDashboard() {
                             ) : (
                                 <p className="text-muted-foreground text-sm">You are not clocked in</p>
                             )}
-                        </div>
-                        <button
-                            onClick={clockedIn ? handleClockOut : handleClockIn}
-                            disabled={clockLoading}
-                            className={`${clockedIn ? 'btn-destructive' : 'btn-primary'
-                                } w-full sm:w-auto min-w-[120px] sm:min-w-[150px]`}
-                        >
-                            {clockLoading ? (
-                                <span className="animate-spin">⏳</span>
-                            ) : clockedIn ? (
-                                <>🚪 Clock Out</>
-                            ) : (
-                                <>⏰ Clock In</>
+                            {/* Location Status Indicator */}
+                            {lastLocationStatus && (
+                                <p className={`text-xs mt-1 ${
+                                    lastLocationStatus === 'captured' ? 'text-green-600' :
+                                    lastLocationStatus === 'denied' ? 'text-red-600' :
+                                    'text-yellow-600'
+                                }`}>
+                                    {lastLocationStatus === 'captured' && '📍 Location captured'}
+                                    {lastLocationStatus === 'denied' && '🚫 Location denied'}
+                                    {lastLocationStatus === 'timeout' && '⏱️ Location timeout'}
+                                    {lastLocationStatus === 'unavailable' && '⚠️ Location unavailable'}
+                                </p>
                             )}
-                        </button>
+                        </div>
+                        <div className="flex flex-col gap-2 w-full sm:w-auto">
+                            <button
+                                onClick={clockedIn ? handleClockOut : handleClockIn}
+                                disabled={clockLoading}
+                                className={`${clockedIn ? 'btn-destructive' : 'btn-primary'
+                                    } w-full sm:w-auto min-w-[120px] sm:min-w-[150px] flex items-center justify-center gap-2`}
+                            >
+                                {clockLoading ? (
+                                    <>
+                                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                        </svg>
+                                        {clockedIn ? 'Clocking Out...' : 'Clocking In...'}
+                                    </>
+                                ) : clockedIn ? (
+                                    <>🚪 Clock Out</>
+                                ) : (
+                                    <>⏰ Clock In</>
+                                )}
+                            </button>
+                            {/* Location permission hint */}
+                            {locationPermission === 'denied' && (
+                                <p className="text-xs text-red-600 dark:text-red-400 text-center">
+                                    Location access denied. <button onClick={() => setShowLocationPrompt(true)} className="underline">Fix it</button>
+                                </p>
+                            )}
+                        </div>
                     </div>
                 </div>
             </div>

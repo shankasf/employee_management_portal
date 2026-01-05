@@ -73,7 +73,7 @@ export default function EmployeeAttendancePage() {
         } else if (!authLoading && !user) {
             setLoading(false)
         }
-    }, [authLoading, user?.id, loadAttendance])
+    }, [authLoading, user, loadAttendance])
 
     const totalHours = logs
         .filter((log) => log.total_hours)

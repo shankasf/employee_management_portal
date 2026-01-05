@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { useEmployees, invalidateQueries } from '@/lib/hooks/useData'
@@ -86,11 +86,7 @@ export default function AdminSchedulesPage() {
         location: '',
     })
 
-    useEffect(() => {
-        loadSchedules()
-    }, [statusFilter, dateFilter])
-
-    async function loadSchedules() {
+    const loadSchedules = useCallback(async () => {
         setLoading(true)
         try {
             const supabase = createUntypedClient()
@@ -126,7 +122,11 @@ export default function AdminSchedulesPage() {
         } finally {
             setLoading(false)
         }
-    }
+    }, [statusFilter, dateFilter])
+
+    useEffect(() => {
+        loadSchedules()
+    }, [loadSchedules])
 
     async function handleSubmit(e: React.FormEvent) {
         e.preventDefault()

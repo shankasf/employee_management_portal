@@ -1,8 +1,50 @@
-# Caddy configuration for PlayFunia Employee Management
-# Access via http://72.62.162.219 (port 80)
+# Caddy configuration for PlayFunia applications
+# Caddy automatically handles SSL certificates via Let's Encrypt
 
-:80 {
-    # Reverse proxy to Next.js app
+# Main Playfunia website - playfunia.com with HTTPS
+playfunia.com {
+    # API routes go to backend
+    handle /api/* {
+        reverse_proxy 172.20.0.1:5001
+    }
+
+    # Chatbot API
+    handle /chatbot/* {
+        uri strip_prefix /chatbot
+        reverse_proxy 172.20.0.1:8002
+    }
+
+    # All other requests go to frontend
+    handle {
+        reverse_proxy 172.20.0.1:3002
+    }
+
+    # Enable compression
+    encode gzip zstd
+
+    # Access logging
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
+    # Security headers
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}
+
+# www redirect to non-www
+www.playfunia.com {
+    redir https://playfunia.com{uri} permanent
+}
+
+# Employee Management - accessible via IP on HTTP only
+http://72.62.162.219:80 {
+    # Reverse proxy to Next.js employee management app
     reverse_proxy app:3000
 
     # Enable access logging
@@ -20,13 +62,3 @@
         respond "OK" 200
     }
 }
-
-# HTTPS configuration (uncomment when you have a domain)
-# yourdomain.com {
-#     reverse_proxy app:3000
-#     log {
-#         output stdout
-#         format console
-#     }
-#     encode gzip zstd
-# }
