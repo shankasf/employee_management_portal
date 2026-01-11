@@ -51,7 +51,7 @@ function LoginForm() {
                 } else {
                     router.push('/employee')
                 }
-                router.refresh()
+                // Note: router.refresh() removed - middleware handles session properly
             }
         } catch (err) {
             setError('An unexpected error occurred')

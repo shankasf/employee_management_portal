@@ -54,14 +54,39 @@ export async function updateSession(request: NextRequest) {
 
   // If logged in, check role-based access
   if (user) {
-    // Always fetch fresh role from database (no caching to avoid stale roles)
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", user.id)
-      .single();
+    // Check for cached role in cookie (expires after 5 minutes)
+    const cachedRole = request.cookies.get("user_role")?.value;
+    const cachedUserId = request.cookies.get("user_role_id")?.value;
 
-    const role = profile?.role || "employee";
+    let role = "employee";
+
+    // Use cached role if valid (same user and cache exists)
+    if (cachedRole && cachedUserId === user.id) {
+      role = cachedRole;
+    } else {
+      // Fetch fresh role from database
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", user.id)
+        .single();
+
+      role = profile?.role || "employee";
+
+      // Cache role in cookie for 5 minutes
+      supabaseResponse.cookies.set("user_role", role, {
+        maxAge: 300, // 5 minutes
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+      });
+      supabaseResponse.cookies.set("user_role_id", user.id, {
+        maxAge: 300,
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+      });
+    }
 
     const isAdmin = role === "admin";
     const isEmployee = role === "employee";

@@ -97,85 +97,99 @@ export default function EmployeeDashboard() {
         }
         const supabase = createUntypedClient()
 
-        // Set a timeout to prevent infinite loading
-        const timeout = setTimeout(() => {
-            console.warn('Dashboard load timeout - showing with available data')
-            setLoading(false)
-        }, 5000)
-
         try {
-            // Fetch registered device info
-            const { data: employeeData } = await supabase
-                .from('employees')
-                .select('registered_device_id, device_name')
-                .eq('id', user.id)
-                .single()
+            // Run all data fetches in PARALLEL for much faster loading
+            const [
+                employeeResult,
+                attendanceResult,
+                tasksResult,
+                eventsResult,
+                policiesResult
+            ] = await Promise.allSettled([
+                // 1. Fetch registered device info
+                supabase
+                    .from('employees')
+                    .select('registered_device_id, device_name')
+                    .eq('id', user.id)
+                    .single(),
 
-            if (employeeData) {
-                setRegisteredDeviceId(employeeData.registered_device_id)
-                setRegisteredDeviceName(employeeData.device_name)
-                // Check if current device matches registered device
-                if (currentDeviceInfo && employeeData.registered_device_id) {
-                    setDeviceMismatch(employeeData.registered_device_id !== currentDeviceInfo.deviceId)
-                }
-            }
-
-            // Check if clocked in - try RPC first, then fallback to direct query
-            let clockedInData = null
-            try {
-                const { data: attendance, error: rpcError } = await supabase.rpc('get_open_attendance')
-                if (rpcError) {
-                    console.warn('RPC get_open_attendance error:', rpcError)
-                    throw rpcError
-                }
-                if (attendance && attendance.length > 0) {
-                    clockedInData = attendance[0]
-                }
-            } catch (err) {
-                console.warn('RPC get_open_attendance failed, using direct query:', err)
-                const { data: attendanceData, error: queryError } = await supabase
+                // 2. Check if clocked in - direct query (faster than RPC with fallback)
+                supabase
                     .from('attendance_logs')
                     .select('id, clock_in')
                     .eq('employee_id', user.id)
                     .is('clock_out', null)
                     .order('clock_in', { ascending: false })
-                    .limit(1)
+                    .limit(1),
 
-                if (queryError) {
-                    console.error('Direct attendance query error:', queryError)
-                } else {
-                    clockedInData = attendanceData?.[0] || null
-                }
-            }
-            setClockedIn(clockedInData)
+                // 3. Get today's tasks - direct query
+                (async () => {
+                    const today = new Date().toISOString().split('T')[0]
+                    return supabase
+                        .from('task_instances')
+                        .select(`
+                            id,
+                            task_id,
+                            status,
+                            tasks (
+                                title,
+                                description,
+                                location,
+                                cutoff_time,
+                                requires_photo,
+                                requires_video,
+                                requires_notes
+                            )
+                        `)
+                        .eq('employee_id', user.id)
+                        .eq('scheduled_date', today)
+                        .limit(10)
+                })(),
 
-            // Get today's tasks
-            try {
-                const { data: tasksData } = await supabase.rpc('get_today_tasks')
-                setTasks(tasksData || [])
-            } catch (err) {
-                console.warn('RPC get_today_tasks not available, using direct query:', err)
-                const today = new Date().toISOString().split('T')[0]
-                const { data: tasksData } = await supabase
-                    .from('task_instances')
+                // 4. Get upcoming events - direct query
+                supabase
+                    .from('event_staff_assignments')
                     .select(`
-                        id,
-                        task_id,
-                        status,
-                        tasks (
+                        role,
+                        events (
+                            id,
                             title,
-                            description,
-                            location,
-                            cutoff_time,
-                            requires_photo,
-                            requires_video,
-                            requires_notes
+                            start_time,
+                            end_time,
+                            room
                         )
                     `)
                     .eq('employee_id', user.id)
-                    .eq('scheduled_date', today)
-                    .limit(10)
+                    .limit(5),
 
+                // 5. Get active policies
+                supabase
+                    .from('policy_strips')
+                    .select('*')
+                    .eq('is_active', true)
+                    .order('created_at', { ascending: false })
+                    .limit(5)
+            ])
+
+            // Process employee device data
+            if (employeeResult.status === 'fulfilled' && employeeResult.value.data) {
+                const employeeData = employeeResult.value.data
+                setRegisteredDeviceId(employeeData.registered_device_id)
+                setRegisteredDeviceName(employeeData.device_name)
+                if (currentDeviceInfo && employeeData.registered_device_id) {
+                    setDeviceMismatch(employeeData.registered_device_id !== currentDeviceInfo.deviceId)
+                }
+            }
+
+            // Process attendance data
+            if (attendanceResult.status === 'fulfilled') {
+                const attendanceData = attendanceResult.value.data
+                setClockedIn(attendanceData?.[0] || null)
+            }
+
+            // Process tasks data
+            if (tasksResult.status === 'fulfilled') {
+                const tasksData = tasksResult.value.data
                 const formattedTasks = (tasksData || []).map((t: unknown) => {
                     const task = t as { id: string; task_id: string; status: string; tasks: { title: string; description: string | null; location: string | null; cutoff_time: string | null; requires_photo: boolean; requires_video: boolean; requires_notes: boolean } | null }
                     return {
@@ -194,27 +208,9 @@ export default function EmployeeDashboard() {
                 setTasks(formattedTasks)
             }
 
-            // Get upcoming events
-            try {
-                const { data: eventsData } = await supabase.rpc('get_my_upcoming_events', { p_limit: 5 })
-                setEvents(eventsData || [])
-            } catch (err) {
-                console.warn('RPC get_my_upcoming_events not available, using direct query:', err)
-                const { data: assignmentsData } = await supabase
-                    .from('event_staff_assignments')
-                    .select(`
-                        role,
-                        events (
-                            id,
-                            title,
-                            start_time,
-                            end_time,
-                            room
-                        )
-                    `)
-                    .eq('employee_id', user.id)
-                    .limit(5)
-
+            // Process events data
+            if (eventsResult.status === 'fulfilled') {
+                const assignmentsData = eventsResult.value.data
                 const formattedEvents = (assignmentsData || [])
                     .filter((a: unknown) => {
                         const assignment = a as { events: { start_time: string } | null }
@@ -234,20 +230,16 @@ export default function EmployeeDashboard() {
                 setEvents(formattedEvents)
             }
 
-            // Get active policies
-            const { data: policiesData } = await supabase
-                .from('policy_strips')
-                .select('*')
-                .eq('is_active', true)
-                .order('created_at', { ascending: false })
-                .limit(5)
-            setPolicies(policiesData || [])
+            // Process policies data
+            if (policiesResult.status === 'fulfilled') {
+                setPolicies(policiesResult.value.data || [])
+            }
+
             setError(null)
         } catch (err) {
             console.error('Error loading dashboard:', err)
             setError('Failed to load some dashboard data')
         } finally {
-            clearTimeout(timeout)
             setLoading(false)
         }
     }, [user?.id, currentDeviceInfo])
