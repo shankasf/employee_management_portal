@@ -42,23 +42,36 @@ www.playfunia.com {
     redir https://playfunia.com{uri} permanent
 }
 
-# Employee Management - accessible via IP on HTTP only
-http://72.62.162.219:80 {
+# Employee Management Portal - admin.playfunia.com with HTTPS
+admin.playfunia.com {
     # Reverse proxy to Next.js employee management app
     reverse_proxy app:3000
 
-    # Enable access logging
+    # Enable compression
+    encode gzip zstd
+
+    # Access logging
     log {
         output stdout
         format console
         level INFO
     }
 
-    # Enable compression
-    encode gzip zstd
+    # Security headers
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
 
     # Health check endpoint
     handle /health {
         respond "OK" 200
     }
+}
+
+# Redirect HTTP IP access to admin.playfunia.com
+http://72.62.162.219:80 {
+    redir https://admin.playfunia.com{uri} permanent
 }

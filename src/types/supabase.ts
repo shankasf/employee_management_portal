@@ -95,6 +95,10 @@ export type Database = {
           emergency_contact_phone: string | null;
           hr_notes: string | null;
           hourly_rate: number | null;
+          // Device registration
+          registered_device_id: string | null;
+          device_registered_at: string | null;
+          device_name: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -123,6 +127,9 @@ export type Database = {
           emergency_contact_phone?: string | null;
           hr_notes?: string | null;
           hourly_rate?: number | null;
+          registered_device_id?: string | null;
+          device_registered_at?: string | null;
+          device_name?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -151,6 +158,9 @@ export type Database = {
           emergency_contact_phone?: string | null;
           hr_notes?: string | null;
           hourly_rate?: number | null;
+          registered_device_id?: string | null;
+          device_registered_at?: string | null;
+          device_name?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -164,6 +174,24 @@ export type Database = {
           total_hours: number | null;
           late_flag: boolean;
           early_checkout_flag: boolean;
+          // Device tracking
+          clock_in_device_id: string | null;
+          clock_in_device_name: string | null;
+          clock_out_device_id: string | null;
+          clock_out_device_name: string | null;
+          // Location tracking (legacy)
+          clock_in_lat: number | null;
+          clock_in_lng: number | null;
+          clock_in_accuracy: number | null;
+          clock_in_location_status: string | null;
+          clock_out_lat: number | null;
+          clock_out_lng: number | null;
+          clock_out_accuracy: number | null;
+          clock_out_location_status: string | null;
+          // Other fields
+          break_minutes: number | null;
+          work_type: string | null;
+          notes: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -175,6 +203,21 @@ export type Database = {
           total_hours?: number | null;
           late_flag?: boolean;
           early_checkout_flag?: boolean;
+          clock_in_device_id?: string | null;
+          clock_in_device_name?: string | null;
+          clock_out_device_id?: string | null;
+          clock_out_device_name?: string | null;
+          clock_in_lat?: number | null;
+          clock_in_lng?: number | null;
+          clock_in_accuracy?: number | null;
+          clock_in_location_status?: string | null;
+          clock_out_lat?: number | null;
+          clock_out_lng?: number | null;
+          clock_out_accuracy?: number | null;
+          clock_out_location_status?: string | null;
+          break_minutes?: number | null;
+          work_type?: string | null;
+          notes?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -186,6 +229,21 @@ export type Database = {
           total_hours?: number | null;
           late_flag?: boolean;
           early_checkout_flag?: boolean;
+          clock_in_device_id?: string | null;
+          clock_in_device_name?: string | null;
+          clock_out_device_id?: string | null;
+          clock_out_device_name?: string | null;
+          clock_in_lat?: number | null;
+          clock_in_lng?: number | null;
+          clock_in_accuracy?: number | null;
+          clock_in_location_status?: string | null;
+          clock_out_lat?: number | null;
+          clock_out_lng?: number | null;
+          clock_out_accuracy?: number | null;
+          clock_out_location_status?: string | null;
+          break_minutes?: number | null;
+          work_type?: string | null;
+          notes?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -710,6 +768,22 @@ export type Database = {
           company_name: string | null;
           work_location: string | null;
         }[];
+      };
+      register_device: {
+        Args: { p_device_id: string; p_device_name?: string };
+        Returns: boolean;
+      };
+      check_device: {
+        Args: { p_device_id: string };
+        Returns: {
+          is_registered: boolean;
+          registered_device_id: string | null;
+          device_name: string | null;
+        }[];
+      };
+      admin_clear_device: {
+        Args: { p_employee_id: string };
+        Returns: boolean;
       };
     };
     Enums: {

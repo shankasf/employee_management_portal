@@ -4,13 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatTime, formatDateTime } from '@/lib/utils'
-import {
-    captureLocation,
-    checkLocationPermission,
-    requestLocationPermission,
-    getLocationInstructions,
-    type PermissionStatus
-} from '@/lib/geolocation'
+import { getDeviceInfo, formatDeviceDisplay } from '@/lib/device'
 
 interface OpenAttendance {
     id: string
@@ -56,41 +50,45 @@ export default function EmployeeDashboard() {
     const [clockLoading, setClockLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
 
-    // Location permission state
-    const [locationPermission, setLocationPermission] = useState<PermissionStatus>('prompt')
-    const [showLocationPrompt, setShowLocationPrompt] = useState(false)
-    const [locationRequesting, setLocationRequesting] = useState(false)
-    const [lastLocationStatus, setLastLocationStatus] = useState<string | null>(null)
+    // Device registration state
+    const [showDevicePrompt, setShowDevicePrompt] = useState(false)
+    const [deviceRegistering, setDeviceRegistering] = useState(false)
+    const [registeredDeviceId, setRegisteredDeviceId] = useState<string | null>(null)
+    const [registeredDeviceName, setRegisteredDeviceName] = useState<string | null>(null)
+    const [currentDeviceInfo, setCurrentDeviceInfo] = useState<{ deviceId: string; deviceName: string } | null>(null)
+    const [deviceMismatch, setDeviceMismatch] = useState(false)
 
-    // Check location permission on mount
+    // Get current device info on mount
     useEffect(() => {
-        checkLocationPermission().then(setLocationPermission)
+        const info = getDeviceInfo()
+        setCurrentDeviceInfo(info)
     }, [])
 
-    // Request location permission
-    const handleRequestPermission = useCallback(async () => {
-        setLocationRequesting(true)
+    // Register device for this employee
+    const handleRegisterDevice = useCallback(async () => {
+        if (!user?.id || !currentDeviceInfo) return
+
+        setDeviceRegistering(true)
         try {
-            const status = await requestLocationPermission()
-            setLocationPermission(status)
-            if (status === 'granted') {
-                setShowLocationPrompt(false)
-            }
-        } finally {
-            setLocationRequesting(false)
-        }
-    }, [])
+            const supabase = createUntypedClient()
+            const { error } = await supabase.rpc('register_device', {
+                p_device_id: currentDeviceInfo.deviceId,
+                p_device_name: currentDeviceInfo.deviceName
+            })
 
-    // Auto-trigger permission request when modal opens
-    useEffect(() => {
-        if (showLocationPrompt && locationPermission === 'prompt') {
-            // Small delay to show the modal first, then trigger permission
-            const timer = setTimeout(() => {
-                handleRequestPermission()
-            }, 500)
-            return () => clearTimeout(timer)
+            if (error) throw error
+
+            setRegisteredDeviceId(currentDeviceInfo.deviceId)
+            setRegisteredDeviceName(currentDeviceInfo.deviceName)
+            setDeviceMismatch(false)
+            setShowDevicePrompt(false)
+        } catch (err) {
+            console.error('Device registration error:', err)
+            alert('Failed to register device. Please try again.')
+        } finally {
+            setDeviceRegistering(false)
         }
-    }, [showLocationPrompt, locationPermission, handleRequestPermission])
+    }, [user?.id, currentDeviceInfo])
 
     const loadData = useCallback(async () => {
         if (!user?.id) {
@@ -106,6 +104,22 @@ export default function EmployeeDashboard() {
         }, 5000)
 
         try {
+            // Fetch registered device info
+            const { data: employeeData } = await supabase
+                .from('employees')
+                .select('registered_device_id, device_name')
+                .eq('id', user.id)
+                .single()
+
+            if (employeeData) {
+                setRegisteredDeviceId(employeeData.registered_device_id)
+                setRegisteredDeviceName(employeeData.device_name)
+                // Check if current device matches registered device
+                if (currentDeviceInfo && employeeData.registered_device_id) {
+                    setDeviceMismatch(employeeData.registered_device_id !== currentDeviceInfo.deviceId)
+                }
+            }
+
             // Check if clocked in - try RPC first, then fallback to direct query
             let clockedInData = null
             try {
@@ -236,7 +250,7 @@ export default function EmployeeDashboard() {
             clearTimeout(timeout)
             setLoading(false)
         }
-    }, [user?.id])
+    }, [user?.id, currentDeviceInfo])
 
     // Load data when user is available and auth is done loading
     useEffect(() => {
@@ -247,25 +261,32 @@ export default function EmployeeDashboard() {
         }
     }, [authLoading, user, loadData])
 
-    // Handle clock in with location
+    // Handle clock in with device verification
     const handleClockIn = async () => {
         if (!user?.id) {
             alert('You must be logged in to clock in')
             return
         }
 
-        // Check if we need to request permission first
-        const currentPermission = await checkLocationPermission()
-        setLocationPermission(currentPermission)
+        if (!currentDeviceInfo) {
+            alert('Unable to identify your device. Please refresh the page.')
+            return
+        }
 
-        if (currentPermission === 'prompt') {
-            // Show permission prompt first
-            setShowLocationPrompt(true)
+        // If no device is registered, prompt to register this device
+        if (!registeredDeviceId) {
+            setShowDevicePrompt(true)
+            return
+        }
+
+        // Check if current device matches registered device
+        if (registeredDeviceId !== currentDeviceInfo.deviceId) {
+            setDeviceMismatch(true)
+            alert('You can only clock in from your registered device. Please use your registered device or contact admin to update your device.')
             return
         }
 
         setClockLoading(true)
-        setLastLocationStatus(null)
 
         try {
             const supabase = createUntypedClient()
@@ -284,29 +305,16 @@ export default function EmployeeDashboard() {
                 return
             }
 
-            // Capture location
-            const location = await captureLocation()
-            setLastLocationStatus(location.status)
-
-            // Insert with location data
+            // Insert with device data
             const { error } = await supabase
                 .from('attendance_logs')
                 .insert({
                     employee_id: user.id,
                     clock_in: new Date().toISOString(),
-                    clock_in_lat: location.lat,
-                    clock_in_lng: location.lng,
-                    clock_in_accuracy: location.accuracy,
-                    clock_in_location_status: location.status,
+                    clock_in_device_id: currentDeviceInfo.deviceId,
+                    clock_in_device_name: currentDeviceInfo.deviceName,
                 })
             if (error) throw error
-
-            // Update permission status after successful capture
-            if (location.status === 'captured') {
-                setLocationPermission('granted')
-            } else if (location.status === 'denied') {
-                setLocationPermission('denied')
-            }
 
             await loadData()
         } catch (err) {
@@ -317,42 +325,34 @@ export default function EmployeeDashboard() {
         }
     }
 
-    // Handle clock out with location
+    // Handle clock out with device verification
     const handleClockOut = async () => {
         if (!user?.id || !clockedIn) {
             alert('You must be clocked in to clock out')
             return
         }
 
-        // Check if we need to request permission first
-        const currentPermission = await checkLocationPermission()
-        setLocationPermission(currentPermission)
-
-        if (currentPermission === 'prompt') {
-            setShowLocationPrompt(true)
+        if (!currentDeviceInfo) {
+            alert('Unable to identify your device. Please refresh the page.')
             return
         }
 
+        // For clock out, we still record the device but don't enforce matching
+        // This allows flexibility if someone needs to clock out from a different device
+
         setClockLoading(true)
-        setLastLocationStatus(null)
 
         try {
             const supabase = createUntypedClient()
             const clockOutTime = new Date().toISOString()
 
-            // Capture location
-            const location = await captureLocation()
-            setLastLocationStatus(location.status)
-
-            // Direct update with location data
+            // Direct update with device data
             const { data, error } = await supabase
                 .from('attendance_logs')
                 .update({
                     clock_out: clockOutTime,
-                    clock_out_lat: location.lat,
-                    clock_out_lng: location.lng,
-                    clock_out_accuracy: location.accuracy,
-                    clock_out_location_status: location.status,
+                    clock_out_device_id: currentDeviceInfo.deviceId,
+                    clock_out_device_name: currentDeviceInfo.deviceName,
                     total_hours: null
                 })
                 .eq('id', clockedIn.id)
@@ -386,16 +386,6 @@ export default function EmployeeDashboard() {
         }
     }
 
-    // Proceed with clock action after permission granted
-    const proceedAfterPermission = async () => {
-        setShowLocationPrompt(false)
-        if (clockedIn) {
-            await handleClockOut()
-        } else {
-            await handleClockIn()
-        }
-    }
-
     if (loading) {
         return (
             <div className="animate-pulse space-y-6">
@@ -413,88 +403,73 @@ export default function EmployeeDashboard() {
 
     return (
         <div className="space-y-4 sm:space-y-6">
-            {/* Location Permission Modal */}
-            {showLocationPrompt && (
+            {/* Device Registration Modal */}
+            {showDevicePrompt && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
                     <div className="bg-card rounded-xl shadow-xl w-full max-w-md border">
                         <div className="p-6">
                             <div className="text-center mb-6">
                                 <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center">
                                     <svg className="w-8 h-8 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z" />
                                     </svg>
                                 </div>
-                                <h2 className="text-xl font-bold mb-2">Location Access Required</h2>
+                                <h2 className="text-xl font-bold mb-2">Register This Device</h2>
                                 <p className="text-muted-foreground text-sm">
-                                    To clock {clockedIn ? 'out' : 'in'}, we need to capture your location for attendance verification.
+                                    To clock in, you need to register this device. Once registered, you can only clock in from this device.
                                 </p>
                             </div>
 
-                            {/* Browser-specific instructions */}
+                            {/* Device info */}
                             <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                                <p className="text-sm font-medium text-blue-800 dark:text-blue-200 mb-1">
+                                    Device Details
+                                </p>
                                 <p className="text-xs text-blue-700 dark:text-blue-300">
-                                    {getLocationInstructions()}
+                                    {currentDeviceInfo?.deviceName || 'Unknown Device'}
+                                </p>
+                                <p className="text-xs text-blue-600 dark:text-blue-400 font-mono mt-1">
+                                    ID: {currentDeviceInfo?.deviceId?.slice(-12) || 'N/A'}
                                 </p>
                             </div>
 
-                            {locationPermission === 'denied' && (
-                                <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
-                                    <p className="text-sm text-red-800 dark:text-red-200 font-medium mb-1">
-                                        Location access was denied
-                                    </p>
-                                    <p className="text-xs text-red-700 dark:text-red-300">
-                                        Please enable location in your browser settings, then try again.
-                                    </p>
-                                </div>
-                            )}
+                            <div className="mb-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+                                <p className="text-xs text-yellow-800 dark:text-yellow-200">
+                                    <strong>Important:</strong> After registering, you will only be able to clock in from this specific device/browser. Contact your admin if you need to change devices.
+                                </p>
+                            </div>
 
                             <div className="space-y-3">
-                                {locationPermission !== 'granted' && (
-                                    <button
-                                        onClick={handleRequestPermission}
-                                        disabled={locationRequesting}
-                                        className="btn-primary w-full flex items-center justify-center gap-2"
-                                    >
-                                        {locationRequesting ? (
-                                            <>
-                                                <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                                                </svg>
-                                                Waiting for permission...
-                                            </>
-                                        ) : (
-                                            <>
-                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                                                </svg>
-                                                {locationPermission === 'denied' ? 'Try Again' : 'Allow Location Access'}
-                                            </>
-                                        )}
-                                    </button>
-                                )}
-
-                                {locationPermission === 'granted' && (
-                                    <button
-                                        onClick={proceedAfterPermission}
-                                        className="btn-primary w-full bg-green-600 hover:bg-green-700"
-                                    >
-                                        Continue to Clock {clockedIn ? 'Out' : 'In'}
-                                    </button>
-                                )}
+                                <button
+                                    onClick={handleRegisterDevice}
+                                    disabled={deviceRegistering}
+                                    className="btn-primary w-full flex items-center justify-center gap-2"
+                                >
+                                    {deviceRegistering ? (
+                                        <>
+                                            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                            </svg>
+                                            Registering...
+                                        </>
+                                    ) : (
+                                        <>
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                            </svg>
+                                            Register This Device
+                                        </>
+                                    )}
+                                </button>
 
                                 <button
-                                    onClick={() => setShowLocationPrompt(false)}
+                                    onClick={() => setShowDevicePrompt(false)}
                                     className="btn-secondary w-full"
                                 >
                                     Cancel
                                 </button>
                             </div>
-
-                            <p className="text-xs text-muted-foreground text-center mt-4">
-                                Your location is only captured when you clock in or out.
-                            </p>
                         </div>
                     </div>
                 </div>
@@ -533,26 +508,30 @@ export default function EmployeeDashboard() {
                             ) : (
                                 <p className="text-muted-foreground text-sm">You are not clocked in</p>
                             )}
-                            {/* Location Status Indicator */}
-                            {lastLocationStatus && (
-                                <p className={`text-xs mt-1 ${
-                                    lastLocationStatus === 'captured' ? 'text-green-600' :
-                                    lastLocationStatus === 'denied' ? 'text-red-600' :
-                                    'text-yellow-600'
-                                }`}>
-                                    {lastLocationStatus === 'captured' && '📍 Location captured'}
-                                    {lastLocationStatus === 'denied' && '🚫 Location denied'}
-                                    {lastLocationStatus === 'timeout' && '⏱️ Location timeout'}
-                                    {lastLocationStatus === 'unavailable' && '⚠️ Location unavailable'}
+                            {/* Device Status Indicator */}
+                            {registeredDeviceId && (
+                                <p className={`text-xs mt-1 ${deviceMismatch ? 'text-red-600' : 'text-green-600'}`}>
+                                    {deviceMismatch ? (
+                                        <>🚫 Wrong device - use {formatDeviceDisplay(registeredDeviceName, registeredDeviceId)}</>
+                                    ) : (
+                                        <>✓ Registered device: {formatDeviceDisplay(registeredDeviceName, registeredDeviceId)}</>
+                                    )}
+                                </p>
+                            )}
+                            {!registeredDeviceId && (
+                                <p className="text-xs mt-1 text-yellow-600">
+                                    ⚠️ No device registered - click Clock In to register
                                 </p>
                             )}
                         </div>
                         <div className="flex flex-col gap-2 w-full sm:w-auto">
                             <button
                                 onClick={clockedIn ? handleClockOut : handleClockIn}
-                                disabled={clockLoading}
+                                disabled={clockLoading || (!clockedIn && deviceMismatch)}
                                 className={`${clockedIn ? 'btn-destructive' : 'btn-primary'
-                                    } w-full sm:w-auto min-w-[120px] sm:min-w-[150px] flex items-center justify-center gap-2`}
+                                    } w-full sm:w-auto min-w-[120px] sm:min-w-[150px] flex items-center justify-center gap-2 ${
+                                    !clockedIn && deviceMismatch ? 'opacity-50 cursor-not-allowed' : ''
+                                    }`}
                             >
                                 {clockLoading ? (
                                     <>
@@ -568,10 +547,10 @@ export default function EmployeeDashboard() {
                                     <>⏰ Clock In</>
                                 )}
                             </button>
-                            {/* Location permission hint */}
-                            {locationPermission === 'denied' && (
+                            {/* Device mismatch hint */}
+                            {deviceMismatch && !clockedIn && (
                                 <p className="text-xs text-red-600 dark:text-red-400 text-center">
-                                    Location access denied. <button onClick={() => setShowLocationPrompt(true)} className="underline">Fix it</button>
+                                    You can only clock in from your registered device.
                                 </p>
                             )}
                         </div>

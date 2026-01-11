@@ -890,5 +890,113 @@ BEGIN
 END $$;
 
 -- =====================================================
+-- PART 10: DEVICE ID CLOCK-IN FEATURE (Added January 2026)
+-- =====================================================
+-- Replaces location-based clock-in with device ID verification
+-- Employees can only clock in from registered devices
+
+-- Add registered_device_id to employees table
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'registered_device_id') THEN
+        ALTER TABLE employees ADD COLUMN registered_device_id TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'device_registered_at') THEN
+        ALTER TABLE employees ADD COLUMN device_registered_at TIMESTAMPTZ;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'device_name') THEN
+        ALTER TABLE employees ADD COLUMN device_name TEXT;
+    END IF;
+END $$;
+
+-- Add device tracking fields to attendance_logs
+DO $$
+BEGIN
+    -- Clock In device fields
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_device_id') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_device_id TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_device_name') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_device_name TEXT;
+    END IF;
+
+    -- Clock Out device fields
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_device_id') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_device_id TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_device_name') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_device_name TEXT;
+    END IF;
+END $$;
+
+-- Function to register a device for an employee
+CREATE OR REPLACE FUNCTION register_device(p_device_id TEXT, p_device_name TEXT DEFAULT NULL)
+RETURNS BOOLEAN AS $$
+BEGIN
+    UPDATE employees
+    SET registered_device_id = p_device_id,
+        device_registered_at = NOW(),
+        device_name = COALESCE(p_device_name, 'Unknown Device')
+    WHERE id = auth.uid();
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Employee not found';
+    END IF;
+
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Function to check if current device matches registered device
+CREATE OR REPLACE FUNCTION check_device(p_device_id TEXT)
+RETURNS TABLE (is_registered BOOLEAN, registered_device_id TEXT, device_name TEXT) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        (e.registered_device_id IS NOT NULL AND e.registered_device_id = p_device_id) AS is_registered,
+        e.registered_device_id,
+        e.device_name
+    FROM employees e
+    WHERE e.id = auth.uid();
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Function to clear registered device (admin only)
+CREATE OR REPLACE FUNCTION admin_clear_device(p_employee_id UUID)
+RETURNS BOOLEAN AS $$
+BEGIN
+    IF NOT is_admin() THEN
+        RAISE EXCEPTION 'Only admins can clear device registration';
+    END IF;
+
+    UPDATE employees
+    SET registered_device_id = NULL,
+        device_registered_at = NULL,
+        device_name = NULL
+    WHERE id = p_employee_id;
+
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- =====================================================
+-- PART 11: ADDITIONAL FIXES AND POLICIES
+-- =====================================================
+-- This section ensures all columns exist and policies are correct
+-- Safe to re-run multiple times (idempotent)
+
+-- Ensure employees can update their own device registration fields
+DROP POLICY IF EXISTS "Employees can update own device" ON employees;
+CREATE POLICY "Employees can update own device" ON employees
+    FOR UPDATE
+    USING (auth.uid() = id)
+    WITH CHECK (auth.uid() = id);
+
+-- Grant execute on device functions to authenticated users
+GRANT EXECUTE ON FUNCTION register_device(TEXT, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION check_device(TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION admin_clear_device(UUID) TO authenticated;
+
+-- =====================================================
 -- SCHEMA COMPLETE
 -- =====================================================
