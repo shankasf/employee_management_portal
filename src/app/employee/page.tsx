@@ -5,13 +5,16 @@ import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatTime, formatDateTime } from '@/lib/utils'
 import { getDeviceInfo, formatDeviceDisplay } from '@/lib/device'
+import {
+    useOpenAttendance,
+    useTodayTasks,
+    useMyUpcomingEvents,
+    useActivePolicies,
+    invalidateQueries
+} from '@/lib/hooks/useData'
+import useSWR from 'swr'
 
-interface OpenAttendance {
-    id: string
-    clock_in: string
-}
-
-interface TodayTask {
+interface Task {
     id: string
     task_id: string
     title: string
@@ -24,7 +27,7 @@ interface TodayTask {
     requires_notes: boolean
 }
 
-interface UpcomingEvent {
+interface Event {
     id: string
     title: string
     start_time: string
@@ -33,7 +36,7 @@ interface UpcomingEvent {
     my_role: string | null
 }
 
-interface PolicyStrip {
+interface Policy {
     id: string
     title: string
     content: string
@@ -42,21 +45,44 @@ interface PolicyStrip {
 
 export default function EmployeeDashboard() {
     const { employee, user, isLoading: authLoading } = useAuth()
-    const [clockedIn, setClockedIn] = useState<OpenAttendance | null>(null)
-    const [tasks, setTasks] = useState<TodayTask[]>([])
-    const [events, setEvents] = useState<UpcomingEvent[]>([])
-    const [policies, setPolicies] = useState<PolicyStrip[]>([])
-    const [loading, setLoading] = useState(true)
     const [clockLoading, setClockLoading] = useState(false)
-    const [error, setError] = useState<string | null>(null)
 
     // Device registration state
     const [showDevicePrompt, setShowDevicePrompt] = useState(false)
     const [deviceRegistering, setDeviceRegistering] = useState(false)
-    const [registeredDeviceId, setRegisteredDeviceId] = useState<string | null>(null)
-    const [registeredDeviceName, setRegisteredDeviceName] = useState<string | null>(null)
     const [currentDeviceInfo, setCurrentDeviceInfo] = useState<{ deviceId: string; deviceName: string } | null>(null)
-    const [deviceMismatch, setDeviceMismatch] = useState(false)
+
+    // Use SWR hooks for cached, instant data on refresh
+    const { data: clockedIn, mutate: mutateAttendance } = useOpenAttendance(user?.id)
+    const { data: rawTasks } = useTodayTasks(user?.id)
+    const { data: rawEvents } = useMyUpcomingEvents(user?.id)
+    const { data: rawPolicies } = useActivePolicies()
+
+    // Type the data with defaults
+    const tasks: Task[] = (rawTasks || []) as Task[]
+    const events: Event[] = (rawEvents || []) as Event[]
+    const policies: Policy[] = (rawPolicies || []) as Policy[]
+
+    // Fetch device info with SWR for caching
+    const { data: deviceData } = useSWR(
+        user?.id ? ['employee:device', user.id] : null,
+        async () => {
+            const supabase = createUntypedClient()
+            const { data } = await supabase
+                .from('employees')
+                .select('registered_device_id, device_name')
+                .eq('id', user!.id)
+                .single()
+            return data
+        },
+        { revalidateOnFocus: false, dedupingInterval: 30000 }
+    )
+
+    const registeredDeviceId = deviceData?.registered_device_id || null
+    const registeredDeviceName = deviceData?.device_name || null
+    const deviceMismatch = currentDeviceInfo && registeredDeviceId
+        ? registeredDeviceId !== currentDeviceInfo.deviceId
+        : false
 
     // Get current device info on mount
     useEffect(() => {
@@ -78,9 +104,8 @@ export default function EmployeeDashboard() {
 
             if (error) throw error
 
-            setRegisteredDeviceId(currentDeviceInfo.deviceId)
-            setRegisteredDeviceName(currentDeviceInfo.deviceName)
-            setDeviceMismatch(false)
+            // Invalidate device cache
+            invalidateQueries.all()
             setShowDevicePrompt(false)
         } catch (err) {
             console.error('Device registration error:', err)
@@ -89,169 +114,6 @@ export default function EmployeeDashboard() {
             setDeviceRegistering(false)
         }
     }, [user?.id, currentDeviceInfo])
-
-    const loadData = useCallback(async () => {
-        if (!user?.id) {
-            setLoading(false)
-            return
-        }
-        const supabase = createUntypedClient()
-
-        try {
-            // Run all data fetches in PARALLEL for much faster loading
-            const [
-                employeeResult,
-                attendanceResult,
-                tasksResult,
-                eventsResult,
-                policiesResult
-            ] = await Promise.allSettled([
-                // 1. Fetch registered device info
-                supabase
-                    .from('employees')
-                    .select('registered_device_id, device_name')
-                    .eq('id', user.id)
-                    .single(),
-
-                // 2. Check if clocked in - direct query (faster than RPC with fallback)
-                supabase
-                    .from('attendance_logs')
-                    .select('id, clock_in')
-                    .eq('employee_id', user.id)
-                    .is('clock_out', null)
-                    .order('clock_in', { ascending: false })
-                    .limit(1),
-
-                // 3. Get today's tasks - direct query
-                (async () => {
-                    const today = new Date().toISOString().split('T')[0]
-                    return supabase
-                        .from('task_instances')
-                        .select(`
-                            id,
-                            task_id,
-                            status,
-                            tasks (
-                                title,
-                                description,
-                                location,
-                                cutoff_time,
-                                requires_photo,
-                                requires_video,
-                                requires_notes
-                            )
-                        `)
-                        .eq('employee_id', user.id)
-                        .eq('scheduled_date', today)
-                        .limit(10)
-                })(),
-
-                // 4. Get upcoming events - direct query
-                supabase
-                    .from('event_staff_assignments')
-                    .select(`
-                        role,
-                        events (
-                            id,
-                            title,
-                            start_time,
-                            end_time,
-                            room
-                        )
-                    `)
-                    .eq('employee_id', user.id)
-                    .limit(5),
-
-                // 5. Get active policies
-                supabase
-                    .from('policy_strips')
-                    .select('*')
-                    .eq('is_active', true)
-                    .order('created_at', { ascending: false })
-                    .limit(5)
-            ])
-
-            // Process employee device data
-            if (employeeResult.status === 'fulfilled' && employeeResult.value.data) {
-                const employeeData = employeeResult.value.data
-                setRegisteredDeviceId(employeeData.registered_device_id)
-                setRegisteredDeviceName(employeeData.device_name)
-                if (currentDeviceInfo && employeeData.registered_device_id) {
-                    setDeviceMismatch(employeeData.registered_device_id !== currentDeviceInfo.deviceId)
-                }
-            }
-
-            // Process attendance data
-            if (attendanceResult.status === 'fulfilled') {
-                const attendanceData = attendanceResult.value.data
-                setClockedIn(attendanceData?.[0] || null)
-            }
-
-            // Process tasks data
-            if (tasksResult.status === 'fulfilled') {
-                const tasksData = tasksResult.value.data
-                const formattedTasks = (tasksData || []).map((t: unknown) => {
-                    const task = t as { id: string; task_id: string; status: string; tasks: { title: string; description: string | null; location: string | null; cutoff_time: string | null; requires_photo: boolean; requires_video: boolean; requires_notes: boolean } | null }
-                    return {
-                        id: task.id,
-                        task_id: task.task_id,
-                        title: task.tasks?.title || 'Unknown Task',
-                        description: task.tasks?.description || null,
-                        location: task.tasks?.location || null,
-                        status: task.status,
-                        cutoff_time: task.tasks?.cutoff_time || null,
-                        requires_photo: task.tasks?.requires_photo || false,
-                        requires_video: task.tasks?.requires_video || false,
-                        requires_notes: task.tasks?.requires_notes || false,
-                    }
-                })
-                setTasks(formattedTasks)
-            }
-
-            // Process events data
-            if (eventsResult.status === 'fulfilled') {
-                const assignmentsData = eventsResult.value.data
-                const formattedEvents = (assignmentsData || [])
-                    .filter((a: unknown) => {
-                        const assignment = a as { events: { start_time: string } | null }
-                        return assignment.events && new Date(assignment.events.start_time) >= new Date()
-                    })
-                    .map((a: unknown) => {
-                        const assignment = a as { role: string | null; events: { id: string; title: string; start_time: string; end_time: string; room: string | null } }
-                        return {
-                            id: assignment.events.id,
-                            title: assignment.events.title,
-                            start_time: assignment.events.start_time,
-                            end_time: assignment.events.end_time,
-                            room: assignment.events.room,
-                            my_role: assignment.role
-                        }
-                    })
-                setEvents(formattedEvents)
-            }
-
-            // Process policies data
-            if (policiesResult.status === 'fulfilled') {
-                setPolicies(policiesResult.value.data || [])
-            }
-
-            setError(null)
-        } catch (err) {
-            console.error('Error loading dashboard:', err)
-            setError('Failed to load some dashboard data')
-        } finally {
-            setLoading(false)
-        }
-    }, [user?.id, currentDeviceInfo])
-
-    // Load data when user is available and auth is done loading
-    useEffect(() => {
-        if (!authLoading && user?.id) {
-            loadData()
-        } else if (!authLoading && !user) {
-            setLoading(false)
-        }
-    }, [authLoading, user, loadData])
 
     // Handle clock in with device verification
     const handleClockIn = async () => {
@@ -273,7 +135,6 @@ export default function EmployeeDashboard() {
 
         // Check if current device matches registered device
         if (registeredDeviceId !== currentDeviceInfo.deviceId) {
-            setDeviceMismatch(true)
             alert('You can only clock in from your registered device. Please use your registered device or contact admin to update your device.')
             return
         }
@@ -293,7 +154,7 @@ export default function EmployeeDashboard() {
 
             if (existing && existing.length > 0) {
                 alert('You are already clocked in')
-                await loadData()
+                mutateAttendance()
                 return
             }
 
@@ -308,7 +169,7 @@ export default function EmployeeDashboard() {
                 })
             if (error) throw error
 
-            await loadData()
+            mutateAttendance()
         } catch (err) {
             console.error('Clock in error:', err)
             alert('Failed to clock in. Please try again.')
@@ -328,9 +189,6 @@ export default function EmployeeDashboard() {
             alert('Unable to identify your device. Please refresh the page.')
             return
         }
-
-        // For clock out, we still record the device but don't enforce matching
-        // This allows flexibility if someone needs to clock out from a different device
 
         setClockLoading(true)
 
@@ -368,7 +226,7 @@ export default function EmployeeDashboard() {
                     .eq('id', clockedIn.id)
             }
 
-            await loadData()
+            mutateAttendance()
         } catch (err) {
             console.error('Clock out error:', err)
             const errorMessage = err instanceof Error ? err.message : 'Unknown error'
@@ -378,7 +236,8 @@ export default function EmployeeDashboard() {
         }
     }
 
-    if (loading) {
+    // Show loading only on initial auth load
+    if (authLoading) {
         return (
             <div className="animate-pulse space-y-6">
                 <div className="h-8 bg-muted rounded w-48"></div>
@@ -464,12 +323,6 @@ export default function EmployeeDashboard() {
                             </div>
                         </div>
                     </div>
-                </div>
-            )}
-
-            {error && (
-                <div className="p-3 sm:p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg text-yellow-800 dark:text-yellow-200 text-sm">
-                    ⚠️ {error}
                 </div>
             )}
 

@@ -298,16 +298,8 @@ export function useOpenAttendance(userId: string | undefined) {
     async () => {
       if (!userId) return null
       const supabase = createUntypedClient()
-      
-      // Try RPC first
-      try {
-        const { data, error } = await supabase.rpc('get_open_attendance')
-        if (!error && data?.length > 0) return data[0]
-      } catch {
-        // Fall through to direct query
-      }
-      
-      // Fallback: direct query
+
+      // Direct query (faster than RPC with fallback)
       const { data, error } = await supabase
         .from('attendance_logs')
         .select('id, clock_in')
@@ -328,22 +320,14 @@ export function useOpenAttendance(userId: string | undefined) {
  */
 export function useTodayTasks(userId: string | undefined) {
   const today = new Date().toISOString().split('T')[0]
-  
+
   return useSWR(
     userId ? ['employee:tasks', userId, today] : null,
     async () => {
       if (!userId) return []
       const supabase = createUntypedClient()
-      
-      // Try RPC first
-      try {
-        const { data, error } = await supabase.rpc('get_today_tasks')
-        if (!error && data) return data
-      } catch {
-        // Fall through to direct query
-      }
-      
-      // Fallback: direct query
+
+      // Direct query (faster than RPC with fallback)
       const { data, error } = await supabase
         .from('task_instances')
         .select(`
@@ -365,7 +349,7 @@ export function useTodayTasks(userId: string | undefined) {
         .limit(10)
 
       if (error) throw error
-      
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (data || []).map((t: any) => ({
         id: t.id,
@@ -393,16 +377,8 @@ export function useMyUpcomingEvents(userId: string | undefined) {
     async () => {
       if (!userId) return []
       const supabase = createUntypedClient()
-      
-      // Try RPC first
-      try {
-        const { data, error } = await supabase.rpc('get_my_upcoming_events', { p_limit: 5 })
-        if (!error && data) return data
-      } catch {
-        // Fall through to direct query
-      }
-      
-      // Fallback: direct query
+
+      // Direct query (faster than RPC with fallback)
       const { data, error } = await supabase
         .from('event_staff_assignments')
         .select(`
@@ -419,7 +395,7 @@ export function useMyUpcomingEvents(userId: string | undefined) {
         .limit(5)
 
       if (error) throw error
-      
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (data || [])
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
