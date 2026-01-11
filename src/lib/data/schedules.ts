@@ -388,32 +388,33 @@ export async function getUpcomingSchedules(employeeId: string, days: number = 7)
 // Get schedule counts by status (for admin dashboard)
 export async function getScheduleStats() {
   const supabase = createClient();
-
-  const { count: pendingCount, error: pendingError } = await supabase
-    .from("schedules")
-    .select("*", { count: "exact", head: true })
-    .eq("status", "pending");
-
-  const { count: cancellationRequestedCount, error: cancelError } = await supabase
-    .from("schedules")
-    .select("*", { count: "exact", head: true })
-    .eq("status", "cancellation_requested");
-
   const today = new Date().toISOString().split("T")[0];
-  const { count: todaySchedulesCount, error: todayError } = await supabase
-    .from("schedules")
-    .select("*", { count: "exact", head: true })
-    .eq("schedule_date", today)
-    .neq("status", "cancelled");
 
-  if (pendingError || cancelError || todayError) {
-    throw pendingError || cancelError || todayError;
+  // Run all count queries in PARALLEL for better performance
+  const [pendingResult, cancelResult, todayResult] = await Promise.all([
+    supabase
+      .from("schedules")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "pending"),
+    supabase
+      .from("schedules")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "cancellation_requested"),
+    supabase
+      .from("schedules")
+      .select("*", { count: "exact", head: true })
+      .eq("schedule_date", today)
+      .neq("status", "cancelled")
+  ]);
+
+  if (pendingResult.error || cancelResult.error || todayResult.error) {
+    throw pendingResult.error || cancelResult.error || todayResult.error;
   }
 
   return {
-    pending: pendingCount || 0,
-    cancellationRequested: cancellationRequestedCount || 0,
-    todaySchedules: todaySchedulesCount || 0,
+    pending: pendingResult.count || 0,
+    cancellationRequested: cancelResult.count || 0,
+    todaySchedules: todayResult.count || 0,
   };
 }
 
@@ -571,33 +572,28 @@ export async function sendScheduleConfirmationEmails(scheduleId: string) {
     type: "employee" | "manager" | "owner";
   }> = [];
 
-  // Log employee email
+  // Log all emails in PARALLEL for better performance
+  const emailPromises: Promise<void>[] = [];
+
   if (employeeEmail) {
-    await logScheduleEmail(
-      scheduleId,
-      "schedule_confirmed",
-      employeeEmail,
-      "employee"
+    emailPromises.push(
+      logScheduleEmail(scheduleId, "schedule_confirmed", employeeEmail, "employee")
     );
     emailsSent.push({ email: employeeEmail, type: "employee" });
   }
 
-  // Log manager/owner emails
   for (const recipient of activeRecipients) {
-    await logScheduleEmail(
-      scheduleId,
-      "schedule_confirmed",
-      recipient.email,
-      recipient.recipient_type
+    emailPromises.push(
+      logScheduleEmail(scheduleId, "schedule_confirmed", recipient.email, recipient.recipient_type)
     );
-    emailsSent.push({
-      email: recipient.email,
-      type: recipient.recipient_type,
-    });
+    emailsSent.push({ email: recipient.email, type: recipient.recipient_type });
   }
 
-  // Update schedule to mark confirmation email as sent
-  await updateSchedule(scheduleId, { confirmation_email_sent: true });
+  // Wait for all email logs and schedule update in parallel
+  await Promise.all([
+    ...emailPromises,
+    updateSchedule(scheduleId, { confirmation_email_sent: true })
+  ]);
 
   return { emailsSent, emailData };
 }
@@ -625,28 +621,28 @@ export async function sendCancellationEmails(
     type: "employee" | "manager" | "owner";
   }> = [];
 
-  // Log employee email
+  // Log all emails in PARALLEL for better performance
+  const emailPromises: Promise<void>[] = [];
+
   if (employeeEmail) {
-    await logScheduleEmail(scheduleId, emailType, employeeEmail, "employee");
+    emailPromises.push(
+      logScheduleEmail(scheduleId, emailType, employeeEmail, "employee")
+    );
     emailsSent.push({ email: employeeEmail, type: "employee" });
   }
 
-  // Log manager/owner emails
   for (const recipient of activeRecipients) {
-    await logScheduleEmail(
-      scheduleId,
-      emailType,
-      recipient.email,
-      recipient.recipient_type
+    emailPromises.push(
+      logScheduleEmail(scheduleId, emailType, recipient.email, recipient.recipient_type)
     );
-    emailsSent.push({
-      email: recipient.email,
-      type: recipient.recipient_type,
-    });
+    emailsSent.push({ email: recipient.email, type: recipient.recipient_type });
   }
 
-  // Update schedule to mark cancellation email as sent
-  await updateSchedule(scheduleId, { cancellation_email_sent: true });
+  // Wait for all email logs and schedule update in parallel
+  await Promise.all([
+    ...emailPromises,
+    updateSchedule(scheduleId, { cancellation_email_sent: true })
+  ]);
 
   return { emailsSent, employeeName };
 }

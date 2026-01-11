@@ -236,6 +236,7 @@ export function useTasks() {
         .from('tasks')
         .select('*')
         .order('title')
+        .limit(100) // Prevent unbounded queries
 
       if (error) throw error
       return data || []
@@ -256,6 +257,7 @@ export function usePolicies() {
         .from('policy_strips')
         .select('*')
         .order('created_at', { ascending: false })
+        .limit(50) // Prevent unbounded queries
 
       if (error) throw error
       return data || []
@@ -277,6 +279,7 @@ export function useActiveEmployees() {
         .select('id, display_name, position')
         .eq('is_active', true)
         .order('display_name')
+        .limit(200) // Prevent unbounded queries
 
       if (error) throw error
       return data || []

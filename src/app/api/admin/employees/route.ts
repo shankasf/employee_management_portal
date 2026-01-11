@@ -94,57 +94,52 @@ export async function POST(request: NextRequest) {
 
         const userId = authData.user.id
 
-        // Wait for trigger to complete
-        await new Promise(resolve => setTimeout(resolve, 300))
+        // Update profile and employee in PARALLEL (no artificial delay needed)
+        // The upsert handles race conditions with triggers
+        const [profileResult, empResult] = await Promise.allSettled([
+            adminClient
+                .from('profiles')
+                .upsert({
+                    id: userId,
+                    email,
+                    full_name,
+                    role: role || 'employee',
+                    status: 'active'
+                }, { onConflict: 'id' }),
+            adminClient
+                .from('employees')
+                .upsert({
+                    id: userId,
+                    display_name: display_name || full_name,
+                    position: position || null,
+                    shift_type: shift_type || 'full-time',
+                    shift_start: shift_start || null,
+                    shift_end: shift_end || null,
+                    company_name: company_name || null,
+                    work_location: work_location || null,
+                    date_of_birth: date_of_birth || null,
+                    phone_number: phone_number || null,
+                    street_address: street_address || null,
+                    city: city || null,
+                    state: state || null,
+                    zip_code: zip_code || null,
+                    country: country || 'USA',
+                    id_document_type: id_document_type || null,
+                    id_document_number: id_document_number || null,
+                    id_document_expiry: id_document_expiry || null,
+                    emergency_contact_name: emergency_contact_name || null,
+                    emergency_contact_phone: emergency_contact_phone || null,
+                    hr_notes: hr_notes || null,
+                    is_active: true
+                }, { onConflict: 'id' })
+        ])
 
-        // Update profile with full details
-        const { error: profileError } = await adminClient
-            .from('profiles')
-            .upsert({
-                id: userId,
-                email,
-                full_name,
-                role: role || 'employee',
-                status: 'active'
-            }, { onConflict: 'id' })
-
-        if (profileError) {
-            console.error('Profile error:', profileError)
-            // Don't fail - trigger might have created it
+        // Log any errors but don't fail - triggers might have created records
+        if (profileResult.status === 'fulfilled' && profileResult.value.error) {
+            console.error('Profile error:', profileResult.value.error)
         }
-
-        // Update employee with full details
-        const { error: empError } = await adminClient
-            .from('employees')
-            .upsert({
-                id: userId,
-                display_name: display_name || full_name,
-                position: position || null,
-                shift_type: shift_type || 'full-time',
-                // New fields
-                shift_start: shift_start || null,
-                shift_end: shift_end || null,
-                company_name: company_name || null,
-                work_location: work_location || null,
-                date_of_birth: date_of_birth || null,
-                phone_number: phone_number || null,
-                street_address: street_address || null,
-                city: city || null,
-                state: state || null,
-                zip_code: zip_code || null,
-                country: country || 'USA',
-                id_document_type: id_document_type || null,
-                id_document_number: id_document_number || null,
-                id_document_expiry: id_document_expiry || null,
-                emergency_contact_name: emergency_contact_name || null,
-                emergency_contact_phone: emergency_contact_phone || null,
-                hr_notes: hr_notes || null,
-                is_active: true
-            }, { onConflict: 'id' })
-
-        if (empError) {
-            console.error('Employee error:', empError)
-            // Don't fail - trigger might have created it
+        if (empResult.status === 'fulfilled' && empResult.value.error) {
+            console.error('Employee error:', empResult.value.error)
         }
 
         return NextResponse.json({
