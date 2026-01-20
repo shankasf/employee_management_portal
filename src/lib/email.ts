@@ -203,7 +203,7 @@ interface WelcomeEmailData {
 }
 
 export async function sendWelcomeEmail(data: WelcomeEmailData): Promise<{ success: boolean; error?: string }> {
-  const portalUrl = data.portalUrl || 'https://employees.playfunia.com'
+  const loginUrl = data.portalUrl || 'https://admin.playfunia.com/login'
 
   const html = wrapInTemplate(`
     <div class="header">
@@ -222,7 +222,7 @@ export async function sendWelcomeEmail(data: WelcomeEmailData): Promise<{ succes
       <p>Please log in and change your password as soon as possible.</p>
 
       <p style="text-align: center;">
-        <a href="${portalUrl}/login" class="button">Login to Portal</a>
+        <a href="${loginUrl}" class="button">Login to Portal</a>
       </p>
 
       <p style="color: #6b7280; font-size: 14px;">
