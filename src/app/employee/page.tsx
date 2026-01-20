@@ -5,7 +5,15 @@ import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatTime, formatDateTime } from '@/lib/utils'
 import { getDeviceInfo, formatDeviceDisplay } from '@/lib/device'
-import { useEmployeeDashboard, invalidateQueries } from '@/lib/hooks/useData'
+import {
+    useEmployeeDashboard,
+    useOpenAttendance,
+    useTodayTasks,
+    useMyUpcomingEvents,
+    useActivePolicies,
+    invalidateQueries
+} from '@/lib/hooks/useData'
+import useSWR from 'swr'
 
 interface Task {
     id: string
@@ -45,18 +53,52 @@ export default function EmployeeDashboard() {
     const [deviceRegistering, setDeviceRegistering] = useState(false)
     const [currentDeviceInfo, setCurrentDeviceInfo] = useState<{ deviceId: string; deviceName: string } | null>(null)
 
-    // PERFORMANCE: Single combined hook fetches all dashboard data in 1 query (was 5 queries)
-    const { data: dashboard, mutate: mutateDashboard } = useEmployeeDashboard(user?.id)
+    // Try combined dashboard hook first (1 query), fallback to individual hooks if RPC not available
+    const { data: dashboard, mutate: mutateDashboard, isLoading: dashboardLoading } = useEmployeeDashboard(user?.id)
 
-    // Extract data from combined response with type safety
-    const clockedIn = dashboard?.open_attendance as { id: string; clock_in: string } | null
-    const tasks: Task[] = (dashboard?.today_tasks || []) as Task[]
-    const events: Event[] = (dashboard?.upcoming_events || []) as Event[]
-    const policies: Policy[] = (dashboard?.active_policies || []) as Policy[]
-    const deviceData = dashboard?.device_info as { registered_device_id: string | null; device_name: string | null } | null
+    // Use fallback if combined hook explicitly returned null (RPC doesn't exist)
+    // Don't use fallback if still loading or if data exists
+    const useFallback = !dashboardLoading && dashboard === null
+
+    // Fallback hooks - only fetch if combined hook returns null (RPC missing)
+    const { data: fallbackAttendance, mutate: mutateFallbackAttendance } = useOpenAttendance(useFallback ? user?.id : undefined)
+    const { data: fallbackTasks } = useTodayTasks(useFallback ? user?.id : undefined)
+    const { data: fallbackEvents } = useMyUpcomingEvents(useFallback ? user?.id : undefined)
+    const { data: fallbackPolicies } = useActivePolicies()
+
+    // Fetch device info with SWR for caching (fallback)
+    const { data: fallbackDeviceData } = useSWR(
+        useFallback && user?.id ? ['employee:device', user.id] : null,
+        async () => {
+            const supabase = createUntypedClient()
+            const { data } = await supabase
+                .from('employees')
+                .select('registered_device_id, device_name')
+                .eq('id', user!.id)
+                .single()
+            return data
+        },
+        { revalidateOnFocus: false, dedupingInterval: 60000 }
+    )
+
+    // Use combined data if available, otherwise use fallback
+    const clockedIn = useFallback
+        ? fallbackAttendance as { id: string; clock_in: string } | null
+        : dashboard?.open_attendance as { id: string; clock_in: string } | null
+    const tasks: Task[] = useFallback
+        ? (fallbackTasks || []) as Task[]
+        : (dashboard?.today_tasks || []) as Task[]
+    const events: Event[] = useFallback
+        ? (fallbackEvents || []) as Event[]
+        : (dashboard?.upcoming_events || []) as Event[]
+    // Policies: use from dashboard if available, otherwise from fallback (which always fetches)
+    const policies: Policy[] = (dashboard?.active_policies || fallbackPolicies || []) as Policy[]
+    const deviceData = useFallback
+        ? fallbackDeviceData as { registered_device_id: string | null; device_name: string | null } | null
+        : dashboard?.device_info as { registered_device_id: string | null; device_name: string | null } | null
 
     // Mutate function for attendance updates
-    const mutateAttendance = mutateDashboard
+    const mutateAttendance = useFallback ? mutateFallbackAttendance : mutateDashboard
 
     const registeredDeviceId = deviceData?.registered_device_id || null
     const registeredDeviceName = deviceData?.device_name || null
