@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { useAuth } from '@/contexts/AuthContext'
 import { useTasks, useActiveEmployees, invalidateQueries } from '@/lib/hooks/useData'
+import { taskNotifications } from '@/lib/notifications'
 
 interface Task {
     id: string
@@ -161,7 +162,7 @@ export default function TasksPage() {
         try {
             const supabase = createUntypedClient()
 
-            const { error } = await supabase
+            const { data, error } = await supabase
                 .from('task_instances')
                 .insert({
                     task_id: assigningTask.id,
@@ -169,8 +170,15 @@ export default function TasksPage() {
                     scheduled_date: assignData.scheduled_date,
                     status: 'pending'
                 })
+                .select()
+                .single()
 
             if (error) throw error
+
+            // Send email notification to assigned employee (non-blocking)
+            if (data?.id) {
+                taskNotifications.assigned(data.id).catch(console.error)
+            }
 
             alert('Task assigned successfully!')
             closeAssignModal()

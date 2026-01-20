@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 import { createClient as createServerClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
+import { sendWelcomeEmail, sendEmployeeCreatedNotification, sendEmployeeDeletedNotification } from '@/lib/email'
+import { getCurrentNYTime } from '@/lib/utils'
 
 // Create admin client with service role key
 function createAdminClient() {
@@ -142,6 +144,21 @@ export async function POST(request: NextRequest) {
             console.error('Employee error:', empResult.value.error)
         }
 
+        // Send welcome email with credentials (non-blocking)
+        sendWelcomeEmail({
+            employeeName: display_name || full_name,
+            email,
+            tempPassword: password,
+        }).catch(err => console.error('Failed to send welcome email:', err))
+
+        // Send notification to admin about new employee (non-blocking)
+        sendEmployeeCreatedNotification({
+            employeeName: display_name || full_name,
+            email,
+            position: position || undefined,
+            createdAt: getCurrentNYTime(),
+        }).catch(err => console.error('Failed to send admin notification:', err))
+
         return NextResponse.json({
             success: true,
             user: { id: userId, email }
@@ -184,32 +201,56 @@ export async function DELETE(request: NextRequest) {
 
         const adminClient = createAdminClient()
 
-        // Delete from employees table first (cascade will handle related records)
-        const { error: empError } = await adminClient
+        // Fetch employee data BEFORE deletion (for email notification)
+        const { data: employeeData } = await adminClient
             .from('employees')
-            .delete()
+            .select(`
+                display_name,
+                position,
+                profiles (
+                    email,
+                    full_name
+                )
+            `)
             .eq('id', employeeId)
+            .single()
 
-        if (empError) {
-            console.error('Employee delete error:', empError)
+        // Store employee info for notification
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const empInfo = employeeData as any
+        const employeeName = empInfo?.display_name || empInfo?.profiles?.full_name || 'Unknown'
+        const employeeEmail = empInfo?.profiles?.email || null
+        const employeePosition = empInfo?.position || undefined
+
+        // Delete from employees, profiles, and auth in PARALLEL for faster response
+        const [empResult, profileResult, authResult] = await Promise.allSettled([
+            adminClient.from('employees').delete().eq('id', employeeId),
+            adminClient.from('profiles').delete().eq('id', employeeId),
+            adminClient.auth.admin.deleteUser(employeeId)
+        ])
+
+        // Log errors but don't fail - some may already be deleted
+        if (empResult.status === 'fulfilled' && empResult.value.error) {
+            console.error('Employee delete error:', empResult.value.error)
+        }
+        if (profileResult.status === 'fulfilled' && profileResult.value.error) {
+            console.error('Profile delete error:', profileResult.value.error)
+        }
+        if (authResult.status === 'rejected') {
+            console.error('Auth delete error:', authResult.reason)
+        } else if (authResult.status === 'fulfilled' && authResult.value.error) {
+            console.error('Auth delete error:', authResult.value.error)
+            return NextResponse.json({ error: authResult.value.error.message }, { status: 400 })
         }
 
-        // Delete from profiles table
-        const { error: profileError } = await adminClient
-            .from('profiles')
-            .delete()
-            .eq('id', employeeId)
-
-        if (profileError) {
-            console.error('Profile delete error:', profileError)
-        }
-
-        // Delete from Supabase Auth
-        const { error: authError } = await adminClient.auth.admin.deleteUser(employeeId)
-
-        if (authError) {
-            console.error('Auth delete error:', authError)
-            return NextResponse.json({ error: authError.message }, { status: 400 })
+        // Send email notifications (non-blocking)
+        if (employeeEmail) {
+            sendEmployeeDeletedNotification({
+                employeeName,
+                email: employeeEmail,
+                position: employeePosition,
+                deletedAt: getCurrentNYTime(),
+            }).catch(err => console.error('Failed to send deletion notification:', err))
         }
 
         return NextResponse.json({

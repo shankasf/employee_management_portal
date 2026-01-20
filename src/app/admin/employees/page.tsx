@@ -217,8 +217,8 @@ export default function EmployeesPage() {
         try {
             const supabase = createUntypedClient()
 
-            // Update employee table
-            const { error: empError } = await supabase
+            // Prepare update operations
+            const employeeUpdate = supabase
                 .from('employees')
                 .update({
                     display_name: editFormData.display_name || null,
@@ -245,17 +245,22 @@ export default function EmployeesPage() {
                 })
                 .eq('id', editingEmployee.id)
 
-            if (empError) throw empError
+            // Run updates in PARALLEL for faster response
+            const updates: Promise<{ error: Error | null }>[] = [employeeUpdate]
 
-            // Update profile role if changed
+            // Only update profile if role changed
             if (editFormData.role !== editingEmployee.profiles?.role) {
-                const { error: profileError } = await supabase
-                    .from('profiles')
-                    .update({ role: editFormData.role })
-                    .eq('id', editingEmployee.id)
-
-                if (profileError) throw profileError
+                updates.push(
+                    supabase
+                        .from('profiles')
+                        .update({ role: editFormData.role })
+                        .eq('id', editingEmployee.id)
+                )
             }
+
+            const results = await Promise.all(updates)
+            const errors = results.filter(r => r.error).map(r => r.error)
+            if (errors.length > 0) throw errors[0]
 
             alert('Employee updated successfully!')
             setShowEditModal(false)

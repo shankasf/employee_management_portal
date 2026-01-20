@@ -588,8 +588,8 @@ export default function ReportsPage() {
                                                         <td className="px-4 py-3 text-sm">
                                                             <p>{formatDate(event.start_time)}</p>
                                                             <p className="text-xs text-muted-foreground">
-                                                                {new Date(event.start_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
-                                                                {event.end_time && ` - ${new Date(event.end_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}`}
+                                                                {new Date(event.start_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
+                                                                {event.end_time && ` - ${new Date(event.end_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`}
                                                             </p>
                                                         </td>
                                                         <td className="px-4 py-3 text-sm">

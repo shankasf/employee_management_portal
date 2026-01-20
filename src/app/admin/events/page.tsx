@@ -5,6 +5,7 @@ import { createUntypedClient } from '@/lib/supabase/client'
 import { formatDate, formatTime } from '@/lib/utils'
 import { useAuth } from '@/contexts/AuthContext'
 import { useEvents, useActiveEmployees, invalidateQueries } from '@/lib/hooks/useData'
+import { eventNotifications } from '@/lib/notifications'
 
 interface Event {
     id: string
@@ -172,6 +173,13 @@ export default function EventsPage() {
 
             if (error) throw error
 
+            // Send email notification to assigned employee (non-blocking)
+            eventNotifications.assigned(
+                assigningEvent.id,
+                assignData.employee_id,
+                assignData.role || 'Staff'
+            ).catch(console.error)
+
             alert('Staff assigned successfully!')
             closeAssignModal()
             invalidateQueries.events()
@@ -185,7 +193,7 @@ export default function EventsPage() {
         }
     }
 
-    async function removeAssignment(assignmentId: string) {
+    async function removeAssignment(assignmentId: string, eventId: string, employeeId: string) {
         if (!confirm('Remove this staff assignment?')) return
         try {
             const supabase = createUntypedClient()
@@ -194,6 +202,10 @@ export default function EventsPage() {
                 .delete()
                 .eq('id', assignmentId)
             if (error) throw error
+
+            // Send email notification to removed employee (non-blocking)
+            eventNotifications.removed(eventId, employeeId).catch(console.error)
+
             invalidateQueries.events()
             mutate()
         } catch (err) {
@@ -492,7 +504,7 @@ export default function EventsPage() {
                                                     </span>
                                                     <button
                                                         className="btn-ghost btn-sm text-destructive"
-                                                        onClick={() => removeAssignment(a.id)}
+                                                        onClick={() => removeAssignment(a.id, viewingEvent.id, a.employees?.id || '')}
                                                     >
                                                         ✕
                                                     </button>

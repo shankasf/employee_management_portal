@@ -5,6 +5,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { ScheduleStatus } from '@/types/supabase'
 import { formatLocationStatus } from '@/lib/geolocation'
+import { scheduleNotifications } from '@/lib/notifications'
 
 // Types
 interface Schedule {
@@ -208,6 +209,10 @@ export default function EmployeeSchedulesPage() {
                 .eq('status', 'pending')
 
             if (error) throw error
+
+            // Send email notification to managers (non-blocking)
+            scheduleNotifications.confirmed(scheduleId).catch(console.error)
+
             alert('Schedule confirmed!')
             loadSchedules()
         } catch (err: unknown) {
@@ -237,6 +242,10 @@ export default function EmployeeSchedulesPage() {
                 .eq('employee_id', user?.id)
 
             if (error) throw error
+
+            // Send email notification to managers (non-blocking)
+            scheduleNotifications.cancellationRequested(cancellingSchedule.id, cancellationReason).catch(console.error)
+
             alert('Cancellation request submitted.')
             setShowCancelModal(false)
             setCancellingSchedule(null)
@@ -282,8 +291,8 @@ export default function EmployeeSchedulesPage() {
                 clockInDate.toLocaleDateString(),
                 entry.clock_out ? 'Complete' : 'In Progress',
                 entry.work_type || 'Regular',
-                clockInDate.toLocaleTimeString(),
-                clockOutDate ? clockOutDate.toLocaleTimeString() : '-',
+                clockInDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
+                clockOutDate ? clockOutDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : '-',
                 formatHours(ot),
                 `${entry.break_minutes || 0}m`,
                 formatHours(hours),
@@ -355,7 +364,7 @@ export default function EmployeeSchedulesPage() {
                 <div class="meta">
                     <strong>Employee:</strong> ${employeeName}<br>
                     <strong>Period:</strong> ${monthName}<br>
-                    <strong>Generated:</strong> ${new Date().toLocaleString()}
+                    <strong>Generated:</strong> ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })} ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
                 </div>
                 ${printContent.innerHTML}
                 <div class="footer">PlayFunia Employee Management System</div>
@@ -705,8 +714,8 @@ export default function EmployeeSchedulesPage() {
                                                         </span>
                                                     </td>
                                                     <td className="px-4 py-3 text-sm capitalize">{entry.work_type || 'Regular'}</td>
-                                                    <td className="px-4 py-3 text-sm font-mono">{clockInDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</td>
-                                                    <td className="px-4 py-3 text-sm font-mono">{clockOutDate ? clockOutDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '-'}</td>
+                                                    <td className="px-4 py-3 text-sm font-mono">{clockInDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}</td>
+                                                    <td className="px-4 py-3 text-sm font-mono">{clockOutDate ? clockOutDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : '-'}</td>
                                                     <td className="px-4 py-3 text-sm">
                                                         {ot > 0 ? (
                                                             <span className="text-orange-600 dark:text-orange-400 font-medium">{formatHours(ot)}</span>

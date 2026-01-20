@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { formatDate, getSignedStorageUrl } from '@/lib/utils'
+import { formatDate, formatDateTime, getSignedStorageUrl } from '@/lib/utils'
+import { taskNotifications } from '@/lib/notifications'
 
 interface TaskInstance {
     id: string
@@ -313,6 +314,10 @@ export default function EmployeeTasksPage() {
                 .eq('id', taskInstance.id)
 
             if (error) throw error
+
+            // Send email notification to managers (non-blocking)
+            taskNotifications.completed(taskInstance.id, notes || undefined).catch(console.error)
+
             await loadTasks()
             setSelectedTask(null)
             resetForm()
@@ -646,7 +651,7 @@ export default function EmployeeTasksPage() {
                                     <p className="text-muted-foreground">Completed At</p>
                                     <p className="font-medium">
                                         {viewingTask.completed_at
-                                            ? new Date(viewingTask.completed_at).toLocaleString()
+                                            ? formatDateTime(viewingTask.completed_at)
                                             : 'N/A'}
                                     </p>
                                 </div>
