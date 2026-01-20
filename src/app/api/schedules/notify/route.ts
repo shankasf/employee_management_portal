@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
     const employeeName = employee?.display_name || employee?.profiles?.full_name || 'Employee'
     const employeeEmail = employee?.profiles?.email
 
-    if (!employeeEmail && type !== 'schedule_confirmed' && type !== 'cancellation_requested') {
+    if (!employeeEmail && type !== 'cancellation_requested') {
       return NextResponse.json({ error: 'Employee email not found' }, { status: 400 })
     }
 
@@ -92,6 +92,7 @@ export async function POST(request: NextRequest) {
       case 'schedule_confirmed':
         result = await sendScheduleConfirmedEmail({
           employeeName,
+          employeeEmail: employeeEmail!,
           scheduleDate,
           startTime,
           endTime,

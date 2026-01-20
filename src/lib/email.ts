@@ -318,43 +318,73 @@ export async function sendScheduleAssignedEmail(data: ScheduleEmailData): Promis
 
 interface ScheduleConfirmedEmailData {
   employeeName: string
+  employeeEmail: string
   scheduleDate: string
   startTime: string
   endTime: string
 }
 
 export async function sendScheduleConfirmedEmail(data: ScheduleConfirmedEmailData): Promise<{ success: boolean; error?: string }> {
-  const recipients = await getAllNotificationRecipients()
-  if (recipients.length === 0) {
-    console.log('No notification recipients configured')
-    return { success: true }
-  }
-
-  const html = wrapInTemplate(`
-    <div class="header">
+  // Send confirmation to the employee
+  const employeeHtml = wrapInTemplate(`
+    <div class="header" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
       <h1>Schedule Confirmed</h1>
     </div>
     <div class="content">
-      <p>An employee has confirmed their schedule.</p>
+      <p>Hi ${data.employeeName},</p>
+      <p>Your schedule has been confirmed successfully.</p>
 
       <div class="info-box">
-        <p class="label">Confirmation Details</p>
-        <p><strong>Employee:</strong> ${data.employeeName}</p>
+        <p class="label">Confirmed Schedule</p>
         <p><strong>Date:</strong> ${data.scheduleDate}</p>
         <p><strong>Time:</strong> ${data.startTime} - ${data.endTime}</p>
       </div>
 
+      <p>Thank you for confirming. Please arrive on time for your shift.</p>
+
       <p style="text-align: center;">
-        <a href="https://admin.playfunia.com/admin/schedules" class="button">View Schedules</a>
+        <a href="https://admin.playfunia.com/employee/schedules" class="button">View My Schedules</a>
       </p>
     </div>
   `)
 
-  return sendEmail({
-    to: recipients,
-    subject: `Schedule Confirmed - ${data.employeeName} (${data.scheduleDate})`,
-    html,
+  const employeeResult = await sendEmail({
+    to: data.employeeEmail,
+    subject: `Schedule Confirmed - ${data.scheduleDate}`,
+    html: employeeHtml,
   })
+
+  // Send notification to all admins
+  const recipients = await getAllNotificationRecipients()
+  if (recipients.length > 0) {
+    const adminHtml = wrapInTemplate(`
+      <div class="header">
+        <h1>Schedule Confirmed</h1>
+      </div>
+      <div class="content">
+        <p>An employee has confirmed their schedule.</p>
+
+        <div class="info-box">
+          <p class="label">Confirmation Details</p>
+          <p><strong>Employee:</strong> ${data.employeeName}</p>
+          <p><strong>Date:</strong> ${data.scheduleDate}</p>
+          <p><strong>Time:</strong> ${data.startTime} - ${data.endTime}</p>
+        </div>
+
+        <p style="text-align: center;">
+          <a href="https://admin.playfunia.com/admin/schedules" class="button">View Schedules</a>
+        </p>
+      </div>
+    `)
+
+    await sendEmail({
+      to: recipients,
+      subject: `Schedule Confirmed - ${data.employeeName} (${data.scheduleDate})`,
+      html: adminHtml,
+    })
+  }
+
+  return employeeResult
 }
 
 interface CancellationRequestEmailData {
