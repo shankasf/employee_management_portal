@@ -271,7 +271,7 @@ export async function sendScheduleAssignedEmail(data: ScheduleEmailData): Promis
       <p>Please log in to the portal to confirm your schedule.</p>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/employee/schedules" class="button">View Schedule</a>
+        <a href="https://admin.playfunia.com/employee/schedules" class="button">View Schedule</a>
       </p>
     </div>
   `)
@@ -301,7 +301,7 @@ export async function sendScheduleAssignedEmail(data: ScheduleEmailData): Promis
         </div>
 
         <p style="text-align: center;">
-          <a href="https://employees.playfunia.com/admin/schedules" class="button">View Schedules</a>
+          <a href="https://admin.playfunia.com/admin/schedules" class="button">View Schedules</a>
         </p>
       </div>
     `)
@@ -345,7 +345,7 @@ export async function sendScheduleConfirmedEmail(data: ScheduleConfirmedEmailDat
       </div>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/admin/schedules" class="button">View Schedules</a>
+        <a href="https://admin.playfunia.com/admin/schedules" class="button">View Schedules</a>
       </p>
     </div>
   `)
@@ -387,7 +387,7 @@ export async function sendCancellationRequestEmail(data: CancellationRequestEmai
       <p>Please review and approve or deny this request.</p>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/admin/schedules" class="button">Review Request</a>
+        <a href="https://admin.playfunia.com/admin/schedules" class="button">Review Request</a>
       </p>
     </div>
   `)
@@ -515,7 +515,7 @@ export async function sendAdminCancelledEmail(data: AdminCancelledEmailData): Pr
         </div>
 
         <p style="text-align: center;">
-          <a href="https://employees.playfunia.com/admin/schedules" class="button">View Schedules</a>
+          <a href="https://admin.playfunia.com/admin/schedules" class="button">View Schedules</a>
         </p>
       </div>
     `)
@@ -562,7 +562,7 @@ export async function sendTaskAssignedEmail(data: TaskAssignedEmailData): Promis
       </div>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/employee/tasks" class="button">View Tasks</a>
+        <a href="https://admin.playfunia.com/employee/tasks" class="button">View Tasks</a>
       </p>
     </div>
   `)
@@ -593,7 +593,7 @@ export async function sendTaskAssignedEmail(data: TaskAssignedEmailData): Promis
         </div>
 
         <p style="text-align: center;">
-          <a href="https://employees.playfunia.com/admin/tasks" class="button">View Tasks</a>
+          <a href="https://admin.playfunia.com/admin/tasks" class="button">View Tasks</a>
         </p>
       </div>
     `)
@@ -637,7 +637,7 @@ export async function sendTaskCompletedEmail(data: TaskCompletedEmailData): Prom
       </div>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/admin/tasks" class="button">View Tasks</a>
+        <a href="https://admin.playfunia.com/admin/tasks" class="button">View Tasks</a>
       </p>
     </div>
   `)
@@ -683,7 +683,7 @@ export async function sendEventAssignedEmail(data: EventAssignedEmailData): Prom
       </div>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/employee" class="button">View Events</a>
+        <a href="https://admin.playfunia.com/employee" class="button">View Events</a>
       </p>
     </div>
   `)
@@ -715,7 +715,7 @@ export async function sendEventAssignedEmail(data: EventAssignedEmailData): Prom
         </div>
 
         <p style="text-align: center;">
-          <a href="https://employees.playfunia.com/admin/events" class="button">View Events</a>
+          <a href="https://admin.playfunia.com/admin/events" class="button">View Events</a>
         </p>
       </div>
     `)
@@ -781,7 +781,7 @@ export async function sendEventRemovedEmail(data: EventRemovedEmailData): Promis
         </div>
 
         <p style="text-align: center;">
-          <a href="https://employees.playfunia.com/admin/events" class="button">View Events</a>
+          <a href="https://admin.playfunia.com/admin/events" class="button">View Events</a>
         </p>
       </div>
     `)
@@ -821,7 +821,7 @@ export async function sendEmployeeDeactivatedNotification(data: EmployeeDeactiva
       </div>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/admin/employees" class="button">View Employees</a>
+        <a href="https://admin.playfunia.com/admin/employees" class="button">View Employees</a>
       </p>
     </div>
   `)
@@ -896,7 +896,7 @@ export async function sendEmployeeDeletedNotification(data: EmployeeDeletedEmail
         <p style="color: #dc2626; font-weight: 600;">This action cannot be undone.</p>
 
         <p style="text-align: center;">
-          <a href="https://employees.playfunia.com/admin/employees" class="button">View Employees</a>
+          <a href="https://admin.playfunia.com/admin/employees" class="button">View Employees</a>
         </p>
       </div>
     `)
@@ -941,7 +941,7 @@ export async function sendEmployeeCreatedNotification(data: EmployeeCreatedEmail
       </div>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/admin/employees" class="button">View Employees</a>
+        <a href="https://admin.playfunia.com/admin/employees" class="button">View Employees</a>
       </p>
     </div>
   `)
@@ -993,7 +993,7 @@ export async function sendBulkSchedulesCreatedNotification(data: BulkSchedulesCr
       </div>
 
       <p style="text-align: center;">
-        <a href="https://employees.playfunia.com/admin/schedules" class="button">View Schedules</a>
+        <a href="https://admin.playfunia.com/admin/schedules" class="button">View Schedules</a>
       </p>
     </div>
   `)
