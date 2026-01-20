@@ -6,6 +6,7 @@ import {
   sendCancellationRequestEmail,
   sendCancellationApprovedEmail,
   sendAdminCancelledEmail,
+  sendScheduleDeletedEmail,
 } from '@/lib/email'
 import { formatDate, formatTime } from '@/lib/utils'
 
@@ -15,6 +16,7 @@ type NotificationType =
   | 'cancellation_requested'
   | 'cancellation_approved'
   | 'admin_cancelled'
+  | 'schedule_deleted'
 
 interface NotifyRequest {
   scheduleId: string
@@ -127,6 +129,17 @@ export async function POST(request: NextRequest) {
           startTime,
           endTime,
           reason: reason || scheduleData.cancellation_reason || undefined,
+        })
+        break
+
+      case 'schedule_deleted':
+        result = await sendScheduleDeletedEmail({
+          employeeName,
+          employeeEmail: employeeEmail!,
+          scheduleDate,
+          startTime,
+          endTime,
+          reason: reason || undefined,
         })
         break
 

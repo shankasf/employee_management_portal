@@ -9,6 +9,7 @@ type ScheduleNotificationType =
   | 'cancellation_requested'
   | 'cancellation_approved'
   | 'admin_cancelled'
+  | 'schedule_deleted'
 
 // Task notification types
 type TaskNotificationType = 'task_assigned' | 'task_completed'
@@ -128,6 +129,8 @@ export const scheduleNotifications = {
   cancellationApproved: (scheduleId: string) => notifySchedule(scheduleId, 'cancellation_approved'),
   adminCancelled: (scheduleId: string, reason?: string) =>
     notifySchedule(scheduleId, 'admin_cancelled', reason),
+  deleted: (scheduleId: string, reason?: string) =>
+    notifySchedule(scheduleId, 'schedule_deleted', reason),
   bulkCreated: notifyBulkSchedules,
 }
 

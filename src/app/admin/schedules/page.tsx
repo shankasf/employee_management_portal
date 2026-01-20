@@ -295,6 +295,9 @@ export default function AdminSchedulesPage() {
         if (!confirm('Are you sure you want to delete this schedule? This cannot be undone.')) return
 
         try {
+            // Send notification BEFORE deleting (need schedule data for email)
+            await scheduleNotifications.deleted(scheduleId)
+
             const supabase = createUntypedClient()
             const { error } = await supabase
                 .from('schedules')

@@ -560,6 +560,80 @@ export async function sendAdminCancelledEmail(data: AdminCancelledEmailData): Pr
   return employeeResult
 }
 
+interface ScheduleDeletedEmailData {
+  employeeName: string
+  employeeEmail: string
+  scheduleDate: string
+  startTime: string
+  endTime: string
+  reason?: string
+}
+
+export async function sendScheduleDeletedEmail(data: ScheduleDeletedEmailData): Promise<{ success: boolean; error?: string }> {
+  // Send to employee
+  const employeeHtml = wrapInTemplate(`
+    <div class="header" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);">
+      <h1>Schedule Deleted</h1>
+    </div>
+    <div class="content">
+      <p>Hi ${data.employeeName},</p>
+      <p>Your schedule has been deleted by management.</p>
+
+      <div class="info-box">
+        <p class="label">Deleted Schedule</p>
+        <p><strong>Date:</strong> ${data.scheduleDate}</p>
+        <p><strong>Time:</strong> ${data.startTime} - ${data.endTime}</p>
+        ${data.reason ? `<p><strong>Reason:</strong> ${data.reason}</p>` : ''}
+      </div>
+
+      <p>If you have any questions, please contact your manager.</p>
+
+      <p style="text-align: center;">
+        <a href="https://admin.playfunia.com/employee/schedules" class="button">View My Schedules</a>
+      </p>
+    </div>
+  `)
+
+  const employeeResult = await sendEmail({
+    to: data.employeeEmail,
+    subject: `Schedule Deleted - ${data.scheduleDate}`,
+    html: employeeHtml,
+  })
+
+  // Also notify admin and managers
+  const recipients = await getAllNotificationRecipients()
+  if (recipients.length > 0) {
+    const adminHtml = wrapInTemplate(`
+      <div class="header" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);">
+        <h1>Schedule Deleted</h1>
+      </div>
+      <div class="content">
+        <p>A schedule has been deleted.</p>
+
+        <div class="info-box">
+          <p class="label">Deleted Schedule</p>
+          <p><strong>Employee:</strong> ${data.employeeName}</p>
+          <p><strong>Date:</strong> ${data.scheduleDate}</p>
+          <p><strong>Time:</strong> ${data.startTime} - ${data.endTime}</p>
+          ${data.reason ? `<p><strong>Reason:</strong> ${data.reason}</p>` : ''}
+        </div>
+
+        <p style="text-align: center;">
+          <a href="https://admin.playfunia.com/admin/schedules" class="button">View Schedules</a>
+        </p>
+      </div>
+    `)
+
+    await sendEmail({
+      to: recipients,
+      subject: `Schedule Deleted - ${data.employeeName} (${data.scheduleDate})`,
+      html: adminHtml,
+    })
+  }
+
+  return employeeResult
+}
+
 // ============================================
 // TASK EMAILS
 // ============================================
