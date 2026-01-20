@@ -108,8 +108,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         const initAuth = async () => {
             try {
-                const { data: { session } } = await supabase.auth.getSession()
+                // First try getSession() which reads from storage
+                let { data: { session } } = await supabase.auth.getSession()
                 if (!mounted) return
+
+                // If no session found, try getUser() which validates against server
+                // This handles cases where cookies exist but local storage was cleared
+                if (!session) {
+                    const { data: { user: validatedUser } } = await supabase.auth.getUser()
+                    if (validatedUser && !mounted) return
+
+                    if (validatedUser) {
+                        // User is valid, refresh the session to sync state
+                        const { data: { session: refreshedSession } } = await supabase.auth.refreshSession()
+                        session = refreshedSession
+                    }
+                }
 
                 setSession(session)
                 setUser(session?.user ?? null)
@@ -183,33 +197,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             }
         )
 
-        // Periodic session check every 5 minutes to proactively refresh token
+        // PERFORMANCE: Periodic session refresh every 15 minutes
+        // Uses refreshSession() instead of getUser() to avoid unnecessary server validation
+        // Skips when tab is hidden to reduce background network calls
         const sessionCheckInterval = setInterval(async () => {
             if (!mounted) return
 
+            // PERFORMANCE: Skip validation when tab is not visible
+            if (typeof document !== 'undefined' && document.hidden) return
+
+            const currentUser = userRef.current
+            if (!currentUser) return // No user to refresh
+
             try {
-                const { data: { session: currentSession } } = await supabase.auth.getSession()
-                // Use ref to get current user without stale closure
-                const currentUser = userRef.current
-                if (!currentSession && currentUser) {
-                    // Session expired but we still have user state - try to refresh
-                    const { data: { session: refreshedSession }, error } = await supabase.auth.refreshSession()
-                    if (error || !refreshedSession) {
-                        console.warn('Session expired, clearing state...')
-                        fetchedUserIdRef.current = null
-                        setUser(null)
-                        setProfile(null)
-                        setEmployee(null)
-                        setSession(null)
-                        if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-                            window.location.href = '/login?expired=true'
-                        }
+                // Use refreshSession() - it proactively refreshes the token
+                // This is more efficient than getUser() which validates against server
+                const { data: { session: refreshedSession }, error } = await supabase.auth.refreshSession()
+
+                if (error || !refreshedSession) {
+                    console.warn('Session refresh failed, clearing state...')
+                    fetchedUserIdRef.current = null
+                    setUser(null)
+                    setProfile(null)
+                    setEmployee(null)
+                    setSession(null)
+                    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+                        window.location.href = '/login?expired=true'
                     }
+                } else {
+                    // Update session without triggering full profile fetch
+                    setSession(refreshedSession)
+                    setUser(refreshedSession.user)
                 }
             } catch (err) {
                 console.error('Session check error:', err)
             }
-        }, 5 * 60 * 1000) // Every 5 minutes
+        }, 15 * 60 * 1000) // PERFORMANCE: Every 15 minutes (was 10)
 
         return () => {
             mounted = false

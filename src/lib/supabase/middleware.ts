@@ -2,6 +2,17 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 export async function updateSession(request: NextRequest) {
+  const pathname = request.nextUrl.pathname;
+
+  // PERFORMANCE: Skip middleware for static files and API routes that handle their own auth
+  if (
+    pathname.startsWith('/_next/') ||
+    pathname.startsWith('/api/') ||
+    pathname.includes('.') // Static files (.ico, .png, etc.)
+  ) {
+    return NextResponse.next();
+  }
+
   let supabaseResponse = NextResponse.next({
     request,
   });
@@ -29,20 +40,37 @@ export async function updateSession(request: NextRequest) {
     }
   );
 
-  // IMPORTANT: Avoid writing any logic between createServerClient and
-  // supabase.auth.getUser(). A simple mistake could make it very hard to debug
-  // issues with users being randomly logged out.
+  // PERFORMANCE: Try getSession() first (reads from cookie, no network call)
+  // Only call getUser() if session needs validation
+  const { data: { session } } = await supabase.auth.getSession();
 
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Check if we have a cached session validation timestamp
+  const lastValidated = request.cookies.get("session_validated")?.value;
+  const now = Date.now();
+  const VALIDATION_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
-  const pathname = request.nextUrl.pathname;
+  let user = session?.user ?? null;
+
+  // Only validate with server if session exists and hasn't been validated recently
+  if (session && (!lastValidated || now - parseInt(lastValidated) > VALIDATION_INTERVAL)) {
+    const { data: { user: validatedUser } } = await supabase.auth.getUser();
+    user = validatedUser;
+
+    // Cache validation timestamp
+    if (validatedUser) {
+      supabaseResponse.cookies.set("session_validated", now.toString(), {
+        maxAge: 300, // 5 minutes
+        httpOnly: true,
+        sameSite: "lax",
+        path: "/",
+      });
+    }
+  }
 
   // Public routes that don't require authentication
-  const publicRoutes = ["/login", "/auth/callback", "/"];
+  const publicRoutes = ["/login", "/auth/callback", "/", "/forgot-password", "/reset-password"];
   const isPublicRoute = publicRoutes.some(
-    (route) => pathname === route || pathname.startsWith("/auth/")
+    (route) => pathname === route || pathname.startsWith("/auth/") || pathname.startsWith("/api/")
   );
 
   // If not logged in and trying to access protected route
@@ -73,15 +101,15 @@ export async function updateSession(request: NextRequest) {
 
       role = profile?.role || "employee";
 
-      // Cache role in cookie for 5 minutes
+      // Cache role in cookie for 30 minutes
       supabaseResponse.cookies.set("user_role", role, {
-        maxAge: 300, // 5 minutes
+        maxAge: 1800, // 30 minutes
         httpOnly: true,
         sameSite: "lax",
         path: "/",
       });
       supabaseResponse.cookies.set("user_role_id", user.id, {
-        maxAge: 300,
+        maxAge: 1800,
         httpOnly: true,
         sameSite: "lax",
         path: "/",

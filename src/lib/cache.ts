@@ -1,7 +1,11 @@
 /**
  * Simple client-side cache for Supabase queries to improve navigation performance.
  * Uses a Map with TTL-based expiration and stale-while-revalidate pattern.
+ *
+ * PERFORMANCE: Includes automatic cache cleanup to prevent memory leaks
  */
+
+import { getCacheTimings } from './cookiePreferences'
 
 interface CacheEntry<T> {
   data: T
@@ -9,12 +13,52 @@ interface CacheEntry<T> {
   promise?: Promise<T>
 }
 
+// PERFORMANCE: Maximum cache size to prevent memory leaks
+const MAX_CACHE_SIZE = 100
+
 // Global cache store
 const cache = new Map<string, CacheEntry<unknown>>()
 
-// Default TTL: 30 seconds for fresh data, 5 minutes for stale
-const DEFAULT_FRESH_TTL = 30 * 1000
-const DEFAULT_STALE_TTL = 5 * 60 * 1000
+// PERFORMANCE: Track last cleanup time
+let lastCleanupTime = 0
+const CLEANUP_INTERVAL = 60 * 1000 // 1 minute
+
+/**
+ * Clean up expired cache entries to prevent memory leaks
+ */
+function cleanupCache(staleTTL: number): void {
+  const now = Date.now()
+
+  // Only cleanup periodically
+  if (now - lastCleanupTime < CLEANUP_INTERVAL) return
+  lastCleanupTime = now
+
+  // Remove expired entries - convert to array first to avoid iterator issues
+  const entries = Array.from(cache.entries())
+  entries.forEach(([key, entry]) => {
+    if (now - entry.timestamp > staleTTL) {
+      cache.delete(key)
+    }
+  })
+
+  // If still over limit, remove oldest entries
+  if (cache.size > MAX_CACHE_SIZE) {
+    const sortedEntries = Array.from(cache.entries())
+      .sort((a, b) => a[1].timestamp - b[1].timestamp)
+
+    const toRemove = sortedEntries.slice(0, sortedEntries.length - MAX_CACHE_SIZE)
+    toRemove.forEach(([key]) => cache.delete(key))
+  }
+}
+
+// Get TTL values from cookie preferences (supports fast mode when cookies accepted)
+function getDefaultTTLs() {
+  const timings = getCacheTimings()
+  return {
+    freshTTL: timings.freshTTL,
+    staleTTL: timings.staleTTL,
+  }
+}
 
 interface CacheOptions {
   freshTTL?: number  // Time data is considered fresh
@@ -30,8 +74,13 @@ export async function cachedQuery<T>(
   fetcher: () => Promise<T>,
   options: CacheOptions = {}
 ): Promise<T> {
-  const { freshTTL = DEFAULT_FRESH_TTL, staleTTL = DEFAULT_STALE_TTL } = options
+  const defaults = getDefaultTTLs()
+  const { freshTTL = defaults.freshTTL, staleTTL = defaults.staleTTL } = options
   const now = Date.now()
+
+  // PERFORMANCE: Periodically cleanup expired entries
+  cleanupCache(staleTTL)
+
   const entry = cache.get(key) as CacheEntry<T> | undefined
 
   // If we have fresh data, return it immediately

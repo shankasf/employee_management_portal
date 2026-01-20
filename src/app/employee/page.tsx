@@ -5,14 +5,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatTime, formatDateTime } from '@/lib/utils'
 import { getDeviceInfo, formatDeviceDisplay } from '@/lib/device'
-import {
-    useOpenAttendance,
-    useTodayTasks,
-    useMyUpcomingEvents,
-    useActivePolicies,
-    invalidateQueries
-} from '@/lib/hooks/useData'
-import useSWR from 'swr'
+import { useEmployeeDashboard, invalidateQueries } from '@/lib/hooks/useData'
 
 interface Task {
     id: string
@@ -52,31 +45,18 @@ export default function EmployeeDashboard() {
     const [deviceRegistering, setDeviceRegistering] = useState(false)
     const [currentDeviceInfo, setCurrentDeviceInfo] = useState<{ deviceId: string; deviceName: string } | null>(null)
 
-    // Use SWR hooks for cached, instant data on refresh
-    const { data: clockedIn, mutate: mutateAttendance } = useOpenAttendance(user?.id)
-    const { data: rawTasks } = useTodayTasks(user?.id)
-    const { data: rawEvents } = useMyUpcomingEvents(user?.id)
-    const { data: rawPolicies } = useActivePolicies()
+    // PERFORMANCE: Single combined hook fetches all dashboard data in 1 query (was 5 queries)
+    const { data: dashboard, mutate: mutateDashboard } = useEmployeeDashboard(user?.id)
 
-    // Type the data with defaults
-    const tasks: Task[] = (rawTasks || []) as Task[]
-    const events: Event[] = (rawEvents || []) as Event[]
-    const policies: Policy[] = (rawPolicies || []) as Policy[]
+    // Extract data from combined response with type safety
+    const clockedIn = dashboard?.open_attendance as { id: string; clock_in: string } | null
+    const tasks: Task[] = (dashboard?.today_tasks || []) as Task[]
+    const events: Event[] = (dashboard?.upcoming_events || []) as Event[]
+    const policies: Policy[] = (dashboard?.active_policies || []) as Policy[]
+    const deviceData = dashboard?.device_info as { registered_device_id: string | null; device_name: string | null } | null
 
-    // Fetch device info with SWR for caching
-    const { data: deviceData } = useSWR(
-        user?.id ? ['employee:device', user.id] : null,
-        async () => {
-            const supabase = createUntypedClient()
-            const { data } = await supabase
-                .from('employees')
-                .select('registered_device_id, device_name')
-                .eq('id', user!.id)
-                .single()
-            return data
-        },
-        { revalidateOnFocus: false, dedupingInterval: 30000 }
-    )
+    // Mutate function for attendance updates
+    const mutateAttendance = mutateDashboard
 
     const registeredDeviceId = deviceData?.registered_device_id || null
     const registeredDeviceName = deviceData?.device_name || null

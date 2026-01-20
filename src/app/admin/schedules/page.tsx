@@ -1,11 +1,13 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useMemo } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { useEmployees, invalidateQueries } from '@/lib/hooks/useData'
+import { useEmployees, useSchedules, invalidateQueries } from '@/lib/hooks/useData'
 import { ScheduleStatus } from '@/types/supabase'
+import { scheduleNotifications } from '@/lib/notifications'
 
+// Type for schedule data returned from useSchedules hook
 interface Schedule {
     id: string
     employee_id: string
@@ -16,22 +18,16 @@ interface Schedule {
     description: string | null
     location: string | null
     status: ScheduleStatus
-    created_by: string
-    confirmed_at: string | null
-    cancellation_requested_at: string | null
     cancellation_reason: string | null
-    cancelled_at: string | null
-    cancelled_by: string | null
-    created_at: string
     employee?: {
         id: string
         display_name: string | null
         position: string | null
-        profiles: {
+        profiles?: {
             email: string | null
             full_name: string | null
         } | null
-    }
+    } | null
 }
 
 const statusColors: Record<ScheduleStatus, string> = {
@@ -53,8 +49,6 @@ const statusLabels: Record<ScheduleStatus, string> = {
 export default function AdminSchedulesPage() {
     const { user } = useAuth()
     const { data: employees = [] } = useEmployees(false)
-    const [schedules, setSchedules] = useState<Schedule[]>([])
-    const [loading, setLoading] = useState(true)
     const [showModal, setShowModal] = useState(false)
     const [saving, setSaving] = useState(false)
     const [statusFilter, setStatusFilter] = useState<ScheduleStatus | 'all'>('all')
@@ -62,6 +56,15 @@ export default function AdminSchedulesPage() {
         start: new Date().toISOString().split('T')[0],
         end: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
     })
+
+    // Use SWR hook for cached, instant data loading
+    const filters = useMemo(() => ({
+        startDate: dateFilter.start,
+        endDate: dateFilter.end,
+        status: statusFilter === 'all' ? undefined : statusFilter,
+    }), [dateFilter.start, dateFilter.end, statusFilter])
+
+    const { data: schedules = [], isLoading: loading, mutate: refreshSchedules } = useSchedules(filters)
 
     const [formData, setFormData] = useState({
         employee_id: '',
@@ -86,48 +89,6 @@ export default function AdminSchedulesPage() {
         location: '',
     })
 
-    const loadSchedules = useCallback(async () => {
-        setLoading(true)
-        try {
-            const supabase = createUntypedClient()
-            let query = supabase
-                .from('schedules')
-                .select(`
-                    *,
-                    employee:employees (
-                        id,
-                        display_name,
-                        position,
-                        profiles (
-                            email,
-                            full_name
-                        )
-                    )
-                `)
-                .gte('schedule_date', dateFilter.start)
-                .lte('schedule_date', dateFilter.end)
-                .order('schedule_date', { ascending: true })
-                .order('start_time', { ascending: true })
-
-            if (statusFilter !== 'all') {
-                query = query.eq('status', statusFilter)
-            }
-
-            const { data, error } = await query
-
-            if (error) throw error
-            setSchedules(data || [])
-        } catch (err) {
-            console.error('Error loading schedules:', err)
-        } finally {
-            setLoading(false)
-        }
-    }, [statusFilter, dateFilter])
-
-    useEffect(() => {
-        loadSchedules()
-    }, [loadSchedules])
-
     async function handleSubmit(e: React.FormEvent) {
         e.preventDefault()
         if (!user) return
@@ -135,7 +96,7 @@ export default function AdminSchedulesPage() {
 
         try {
             const supabase = createUntypedClient()
-            const { error } = await supabase
+            const { data, error } = await supabase
                 .from('schedules')
                 .insert({
                     employee_id: formData.employee_id,
@@ -148,8 +109,15 @@ export default function AdminSchedulesPage() {
                     status: 'pending',
                     created_by: user.id,
                 })
+                .select()
+                .single()
 
             if (error) throw error
+
+            // Send email notification (non-blocking)
+            if (data?.id) {
+                scheduleNotifications.assigned(data.id).catch(console.error)
+            }
 
             alert('Schedule created successfully!')
             setShowModal(false)
@@ -162,7 +130,7 @@ export default function AdminSchedulesPage() {
                 description: '',
                 location: '',
             })
-            loadSchedules()
+            refreshSchedules()
         } catch (err: unknown) {
             const error = err as Error
             console.error('Error creating schedule:', error)
@@ -226,6 +194,22 @@ export default function AdminSchedulesPage() {
 
             if (error) throw error
 
+            // Find employee name for notification
+            const selectedEmployee = employees.find((emp: { id: string }) => emp.id === bulkFormData.employee_id) as { id: string; display_name: string | null; profiles: { full_name: string | null } | null } | undefined
+            const employeeName = selectedEmployee?.display_name || selectedEmployee?.profiles?.full_name || 'Employee'
+
+            // Send admin notification about bulk schedules (non-blocking)
+            scheduleNotifications.bulkCreated({
+                employeeId: bulkFormData.employee_id,
+                employeeName,
+                scheduleCount: schedules.length,
+                startDate: bulkFormData.start_date,
+                endDate: bulkFormData.end_date,
+                days: bulkFormData.days,
+                startTime: bulkFormData.start_time,
+                endTime: bulkFormData.end_time,
+            }).catch(console.error)
+
             alert(`${schedules.length} schedules created successfully!`)
             setShowBulkModal(false)
             setBulkFormData({
@@ -238,7 +222,7 @@ export default function AdminSchedulesPage() {
                 title: '',
                 location: '',
             })
-            loadSchedules()
+            refreshSchedules()
         } catch (err: unknown) {
             const error = err as Error
             console.error('Error creating bulk schedules:', error)
@@ -265,7 +249,11 @@ export default function AdminSchedulesPage() {
                 .eq('id', scheduleId)
 
             if (error) throw error
-            loadSchedules()
+
+            // Send email notification (non-blocking)
+            scheduleNotifications.adminCancelled(scheduleId, reason).catch(console.error)
+
+            refreshSchedules()
             invalidateQueries.all()
         } catch (err: unknown) {
             const error = err as Error
@@ -290,7 +278,11 @@ export default function AdminSchedulesPage() {
                 .eq('id', scheduleId)
 
             if (error) throw error
-            loadSchedules()
+
+            // Send email notification (non-blocking)
+            scheduleNotifications.cancellationApproved(scheduleId).catch(console.error)
+
+            refreshSchedules()
             invalidateQueries.all()
         } catch (err: unknown) {
             const error = err as Error
@@ -310,7 +302,7 @@ export default function AdminSchedulesPage() {
                 .eq('id', scheduleId)
 
             if (error) throw error
-            loadSchedules()
+            refreshSchedules()
         } catch (err: unknown) {
             const error = err as Error
             console.error('Error deleting schedule:', error)
@@ -318,8 +310,8 @@ export default function AdminSchedulesPage() {
         }
     }
 
-    const pendingCount = schedules.filter(s => s.status === 'pending').length
-    const cancellationRequestedCount = schedules.filter(s => s.status === 'cancellation_requested').length
+    const pendingCount = schedules.filter((s: { status: string }) => s.status === 'pending').length
+    const cancellationRequestedCount = schedules.filter((s: { status: string }) => s.status === 'cancellation_requested').length
 
     return (
         <div className="space-y-4 sm:space-y-6">
@@ -357,7 +349,7 @@ export default function AdminSchedulesPage() {
                 <div className="card p-3 sm:p-4">
                     <p className="text-xs sm:text-sm text-muted-foreground">Confirmed</p>
                     <p className="text-xl sm:text-2xl font-bold text-green-600">
-                        {schedules.filter(s => s.status === 'confirmed').length}
+                        {schedules.filter((s: { status: string }) => s.status === 'confirmed').length}
                     </p>
                 </div>
             </div>
@@ -399,7 +391,7 @@ export default function AdminSchedulesPage() {
                         </select>
                     </div>
                     <div className="flex items-end">
-                        <button className="btn-secondary w-full" onClick={loadSchedules}>
+                        <button className="btn-secondary w-full" onClick={() => refreshSchedules()}>
                             Refresh
                         </button>
                     </div>
@@ -638,7 +630,7 @@ export default function AdminSchedulesPage() {
                 </div>
             ) : (
                 <div className="space-y-3">
-                    {schedules.map((schedule) => (
+                    {schedules.map((schedule: Schedule) => (
                         <div key={schedule.id} className="card p-4">
                             <div className="flex flex-col sm:flex-row justify-between gap-3">
                                 <div className="flex-1">

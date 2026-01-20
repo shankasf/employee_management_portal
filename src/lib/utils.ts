@@ -14,41 +14,81 @@ export async function getAdminDashboardStats() {
   return data?.[0] ?? null;
 }
 
-// Format date for display
+// New York timezone for all date/time formatting
+export const NY_TIMEZONE = 'America/New_York';
+
+// PERFORMANCE: Cache Intl.DateTimeFormat instances at module level
+// Creating formatters is expensive; reusing them is ~10x faster
+const dateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: NY_TIMEZONE,
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+});
+
+const timeFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: NY_TIMEZONE,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+});
+
+const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: NY_TIMEZONE,
+  year: "numeric",
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+});
+
+const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: NY_TIMEZONE,
+  weekday: "long",
+  year: "numeric",
+  month: "long",
+  day: "numeric",
+});
+
+const relativeTimeFormatter = new Intl.RelativeTimeFormat("en-US", {
+  numeric: "auto",
+});
+
+// Format date for display (New York timezone)
 export function formatDate(date: string | Date): string {
   const d = typeof date === 'string' ? new Date(date) : date;
-  // Check if date is valid
   if (isNaN(d.getTime())) {
     return '-';
   }
-  return d.toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
+  return dateFormatter.format(d);
 }
 
-// Format time for display (handles timezone properly)
+// Format time for display (New York timezone)
 export function formatTime(date: string | Date): string {
   const d = typeof date === 'string' ? new Date(date) : date;
-  // Check if date is valid
   if (isNaN(d.getTime())) {
     return '-';
   }
-  return d.toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  });
+  return timeFormatter.format(d);
 }
 
-// Format datetime for display
+// Format datetime for display (New York timezone)
 export function formatDateTime(date: string | Date): string {
   const d = typeof date === 'string' ? new Date(date) : date;
   if (isNaN(d.getTime())) {
     return '-';
   }
-  return `${formatDate(date)} ${formatTime(date)}`;
+  return dateTimeFormatter.format(d);
+}
+
+// Format date with weekday for display
+export function formatDateWithWeekday(date: string | Date): string {
+  const d = typeof date === 'string' ? new Date(date) : date;
+  if (isNaN(d.getTime())) {
+    return '-';
+  }
+  return weekdayFormatter.format(d);
 }
 
 // Format hours (decimal to hours:minutes)
@@ -58,17 +98,34 @@ export function formatHours(hours: number): string {
   return `${h}h ${m}m`;
 }
 
-// Get relative time (e.g., "2 hours ago")
+// Get current date/time formatted in New York timezone
+export function getCurrentNYTime(): string {
+  return new Date().toLocaleString("en-US", {
+    timeZone: NY_TIMEZONE,
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
+// Get relative time (e.g., "2 hours ago") using cached formatter
 export function getRelativeTime(date: string | Date): string {
   const now = new Date();
   const then = new Date(date);
   const diffInSeconds = Math.floor((now.getTime() - then.getTime()) / 1000);
 
   if (diffInSeconds < 60) return "just now";
-  if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)}m ago`;
-  if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)}h ago`;
-  if (diffInSeconds < 604800)
-    return `${Math.floor(diffInSeconds / 86400)}d ago`;
+  if (diffInSeconds < 3600) {
+    const minutes = Math.floor(diffInSeconds / 60);
+    return relativeTimeFormatter.format(-minutes, "minute");
+  }
+  if (diffInSeconds < 86400) {
+    const hours = Math.floor(diffInSeconds / 3600);
+    return relativeTimeFormatter.format(-hours, "hour");
+  }
+  if (diffInSeconds < 604800) {
+    const days = Math.floor(diffInSeconds / 86400);
+    return relativeTimeFormatter.format(-days, "day");
+  }
   return formatDate(date);
 }
 

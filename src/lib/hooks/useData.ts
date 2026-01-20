@@ -12,6 +12,11 @@
 
 import useSWR, { SWRConfiguration, mutate } from 'swr'
 import { createUntypedClient, isAuthError, refreshSession } from '@/lib/supabase/client'
+import { getCacheTimings } from '@/lib/cookiePreferences'
+
+// PERFORMANCE: Create Supabase client once at module level
+// Avoids function call overhead on every fetch
+const supabase = createUntypedClient()
 
 // Track if we're currently handling an auth error (prevent infinite loops)
 let isHandlingAuthError = false
@@ -46,34 +51,58 @@ const handleAuthError = async (error: unknown): Promise<void> => {
   }
 }
 
-// Default SWR config optimized for our use case
-const defaultConfig: SWRConfiguration = {
-  revalidateOnFocus: true,      // Refetch when window regains focus
-  revalidateOnReconnect: true,  // Refetch when network reconnects
-  dedupingInterval: 5000,       // Dedupe requests within 5 seconds
-  errorRetryCount: 3,           // Retry failed requests 3 times
-  errorRetryInterval: 1000,     // Start with 1s retry interval
-  focusThrottleInterval: 10000, // Throttle focus revalidation to every 10s
-  onError: (error) => {
-    handleAuthError(error)
-  },
-  onErrorRetry: (error, _key, _config, revalidate, { retryCount }) => {
-    // Don't retry on auth errors - handle them differently
-    if (isAuthError(error)) {
+// PERFORMANCE: Deep comparison function for SWR to prevent unnecessary re-renders
+function deepCompare(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== typeof b) return false
+  if (a === null || b === null) return a === b
+  if (typeof a !== 'object') return a === b
+
+  // For arrays and objects, use JSON comparison (fast enough for small objects)
+  try {
+    return JSON.stringify(a) === JSON.stringify(b)
+  } catch {
+    return false
+  }
+}
+
+// Get SWR config based on cookie preferences (fast mode when accepted)
+function getDefaultConfig(): SWRConfiguration {
+  const timings = getCacheTimings()
+  return {
+    revalidateOnFocus: false,     // Disabled - prevents refetch on every tab switch
+    revalidateOnReconnect: false, // Disabled - prevents cascade on network changes
+    revalidateIfStale: false,     // PERFORMANCE: Don't auto-revalidate stale data
+    keepPreviousData: true,       // PERFORMANCE: Show stale data while fetching new
+    dedupingInterval: timings.dedupingInterval,
+    errorRetryCount: 2,           // Retry failed requests 2 times
+    errorRetryInterval: 2000,     // Start with 2s retry interval
+    focusThrottleInterval: timings.focusThrottleInterval,
+    compare: deepCompare,         // PERFORMANCE: Deep compare to prevent re-renders
+    onError: (error) => {
       handleAuthError(error)
-      return
-    }
-    // Standard retry for other errors (max 3 times)
-    if (retryCount >= 3) return
-    setTimeout(() => revalidate({ retryCount }), 1000 * Math.pow(2, retryCount))
-  },
+    },
+    onErrorRetry: (error, _key, _config, revalidate, { retryCount }) => {
+      // Don't retry on auth errors - handle them differently
+      if (isAuthError(error)) {
+        handleAuthError(error)
+        return
+      }
+      // Standard retry for other errors (max 2 times)
+      if (retryCount >= 2) return
+      setTimeout(() => revalidate({ retryCount }), 2000 * Math.pow(2, retryCount))
+    },
+  }
 }
 
 // Longer cache for less frequently changing data
-const longCacheConfig: SWRConfiguration = {
-  ...defaultConfig,
-  dedupingInterval: 30000,      // 30 seconds
-  focusThrottleInterval: 60000, // 1 minute
+function getLongCacheConfig(): SWRConfiguration {
+  const timings = getCacheTimings()
+  return {
+    ...getDefaultConfig(),
+    dedupingInterval: timings.dedupingInterval * 2,
+    focusThrottleInterval: timings.focusThrottleInterval * 2,
+  }
 }
 
 // ============================================
@@ -87,7 +116,6 @@ export function useAdminStats() {
   return useSWR(
     'admin:dashboard:stats',
     async () => {
-      const supabase = createUntypedClient()
       const { data, error } = await supabase.rpc('get_admin_dashboard_stats')
       
       if (error) {
@@ -108,7 +136,7 @@ export function useAdminStats() {
       }
       return data?.[0] || {}
     },
-    { ...defaultConfig, refreshInterval: 30000 } // Auto-refresh every 30s
+    { ...getDefaultConfig(), refreshInterval: getCacheTimings().refreshInterval } // Auto-refresh every 2 minutes
   )
 }
 
@@ -119,8 +147,7 @@ export function useEmployees(showInactive = false) {
   return useSWR(
     ['admin:employees', showInactive],
     async () => {
-      const supabase = createUntypedClient()
-      let query = supabase
+            let query = supabase
         .from('employees')
         .select(`
           *,
@@ -142,7 +169,7 @@ export function useEmployees(showInactive = false) {
       if (error) throw error
       return data || []
     },
-    defaultConfig
+    getDefaultConfig()
   )
 }
 
@@ -153,8 +180,7 @@ export function useAttendance(dateFilter: string) {
   return useSWR(
     ['admin:attendance', dateFilter],
     async () => {
-      const supabase = createUntypedClient()
-      const [year, month, day] = dateFilter.split('-').map(Number)
+            const [year, month, day] = dateFilter.split('-').map(Number)
       const startOfDay = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0))
       const endOfDay = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999))
 
@@ -175,7 +201,7 @@ export function useAttendance(dateFilter: string) {
       if (error) throw error
       return data || []
     },
-    defaultConfig
+    getDefaultConfig()
   )
 }
 
@@ -186,8 +212,7 @@ export function useEvents(filter: 'upcoming' | 'today' | 'past' = 'upcoming') {
   return useSWR(
     ['admin:events', filter],
     async () => {
-      const supabase = createUntypedClient()
-      const now = new Date()
+            const now = new Date()
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0)
       const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59)
 
@@ -220,7 +245,7 @@ export function useEvents(filter: 'upcoming' | 'today' | 'past' = 'upcoming') {
       if (error) throw error
       return data || []
     },
-    defaultConfig
+    getDefaultConfig()
   )
 }
 
@@ -231,8 +256,7 @@ export function useTasks() {
   return useSWR(
     'admin:tasks',
     async () => {
-      const supabase = createUntypedClient()
-      const { data, error } = await supabase
+            const { data, error } = await supabase
         .from('tasks')
         .select('*')
         .order('title')
@@ -241,7 +265,7 @@ export function useTasks() {
       if (error) throw error
       return data || []
     },
-    longCacheConfig
+    getLongCacheConfig()
   )
 }
 
@@ -252,8 +276,7 @@ export function usePolicies() {
   return useSWR(
     'admin:policies',
     async () => {
-      const supabase = createUntypedClient()
-      const { data, error } = await supabase
+            const { data, error } = await supabase
         .from('policy_strips')
         .select('*')
         .order('created_at', { ascending: false })
@@ -262,7 +285,7 @@ export function usePolicies() {
       if (error) throw error
       return data || []
     },
-    longCacheConfig
+    getLongCacheConfig()
   )
 }
 
@@ -273,8 +296,7 @@ export function useActiveEmployees() {
   return useSWR(
     'admin:employees:active',
     async () => {
-      const supabase = createUntypedClient()
-      const { data, error } = await supabase
+            const { data, error } = await supabase
         .from('employees')
         .select('id, display_name, position')
         .eq('is_active', true)
@@ -284,7 +306,7 @@ export function useActiveEmployees() {
       if (error) throw error
       return data || []
     },
-    longCacheConfig
+    getLongCacheConfig()
   )
 }
 
@@ -300,8 +322,7 @@ export function useOpenAttendance(userId: string | undefined) {
     userId ? ['employee:attendance:open', userId] : null,
     async () => {
       if (!userId) return null
-      const supabase = createUntypedClient()
-
+      
       // Direct query (faster than RPC with fallback)
       const { data, error } = await supabase
         .from('attendance_logs')
@@ -314,7 +335,7 @@ export function useOpenAttendance(userId: string | undefined) {
       if (error) throw error
       return data?.[0] || null
     },
-    { ...defaultConfig, refreshInterval: 60000 } // Check every minute
+    { ...getDefaultConfig(), refreshInterval: getCacheTimings().refreshInterval } // Check every 2 minutes
   )
 }
 
@@ -328,8 +349,7 @@ export function useTodayTasks(userId: string | undefined) {
     userId ? ['employee:tasks', userId, today] : null,
     async () => {
       if (!userId) return []
-      const supabase = createUntypedClient()
-
+      
       // Direct query (faster than RPC with fallback)
       const { data, error } = await supabase
         .from('task_instances')
@@ -367,7 +387,7 @@ export function useTodayTasks(userId: string | undefined) {
         requires_notes: t.tasks?.requires_notes || false,
       }))
     },
-    defaultConfig
+    getDefaultConfig()
   )
 }
 
@@ -379,8 +399,7 @@ export function useMyUpcomingEvents(userId: string | undefined) {
     userId ? ['employee:events', userId] : null,
     async () => {
       if (!userId) return []
-      const supabase = createUntypedClient()
-
+      
       // Direct query (faster than RPC with fallback)
       const { data, error } = await supabase
         .from('event_staff_assignments')
@@ -413,7 +432,7 @@ export function useMyUpcomingEvents(userId: string | undefined) {
           my_role: a.role
         }))
     },
-    defaultConfig
+    getDefaultConfig()
   )
 }
 
@@ -424,8 +443,7 @@ export function useActivePolicies() {
   return useSWR(
     'employee:policies:active',
     async () => {
-      const supabase = createUntypedClient()
-      const { data, error } = await supabase
+            const { data, error } = await supabase
         .from('policy_strips')
         .select('*')
         .eq('is_active', true)
@@ -435,7 +453,7 @@ export function useActivePolicies() {
       if (error) throw error
       return data || []
     },
-    { ...longCacheConfig, refreshInterval: 300000 } // Refresh every 5 minutes
+    { ...getLongCacheConfig(), refreshInterval: getCacheTimings().refreshInterval * 2.5 } // Refresh every 5 minutes
   )
 }
 
@@ -447,8 +465,7 @@ export function useMyNotes(userId: string | undefined) {
     userId ? ['employee:notes', userId] : null,
     async () => {
       if (!userId) return []
-      const supabase = createUntypedClient()
-      const { data, error } = await supabase
+            const { data, error } = await supabase
         .from('staff_notes')
         .select(`
           id,
@@ -464,7 +481,85 @@ export function useMyNotes(userId: string | undefined) {
       if (error) throw error
       return data || []
     },
-    defaultConfig
+    getDefaultConfig()
+  )
+}
+
+// ============================================
+// COMBINED DASHBOARD HOOKS (PERFORMANCE OPTIMIZED)
+// ============================================
+
+/**
+ * PERFORMANCE: Fetch all employee dashboard data in a single RPC call
+ * Requires running the 002_performance_rpcs.sql migration first
+ *
+ * This hook fetches:
+ * - Open attendance (clocked in status)
+ * - Today's tasks
+ * - Upcoming events
+ * - Active policies
+ * - Device info
+ *
+ * Usage: const { data } = useEmployeeDashboard(userId)
+ * Then access data.open_attendance, data.today_tasks, etc.
+ */
+export function useEmployeeDashboard(userId: string | undefined) {
+  return useSWR(
+    userId ? ['employee:dashboard:combined', userId] : null,
+    async () => {
+      if (!userId) return null
+
+      const { data, error } = await supabase.rpc('get_employee_dashboard_data', {
+        p_user_id: userId
+      })
+
+      if (error) {
+        // If RPC doesn't exist yet, return null to trigger fallback to individual hooks
+        if (error.code === '42883') { // function does not exist
+          console.warn('get_employee_dashboard_data RPC not found. Run migration 002_performance_rpcs.sql')
+          return null
+        }
+        throw error
+      }
+
+      return data
+    },
+    { ...getDefaultConfig(), refreshInterval: getCacheTimings().refreshInterval }
+  )
+}
+
+/**
+ * PERFORMANCE: Fetch admin schedules page data in a single RPC call
+ * Requires running the 002_performance_rpcs.sql migration first
+ *
+ * Returns schedules, employees list, and stats in one query
+ */
+export function useAdminSchedulesPageData(
+  startDate: string,
+  endDate: string,
+  status?: string
+) {
+  return useSWR(
+    ['admin:schedules:page', startDate, endDate, status],
+    async () => {
+      const { data, error } = await supabase.rpc('get_admin_schedules_page_data', {
+        p_start_date: startDate,
+        p_end_date: endDate,
+        p_status: status || null
+      })
+
+      if (error) {
+        // If RPC doesn't exist yet, return null to trigger fallback
+        if (error.code === '42883') {
+          console.warn('get_admin_schedules_page_data RPC not found. Run migration 002_performance_rpcs.sql')
+          return null
+        }
+        throw error
+      }
+
+      return data
+    },
+    getDefaultConfig()
   )
 }
 
@@ -484,8 +579,7 @@ export function useSchedules(filters?: {
   return useSWR(
     ['admin:schedules', filters],
     async () => {
-      const supabase = createUntypedClient()
-      let query = supabase
+            let query = supabase
         .from('schedules')
         .select(`
           *,
@@ -519,7 +613,7 @@ export function useSchedules(filters?: {
       if (error) throw error
       return data || []
     },
-    defaultConfig
+    getDefaultConfig()
   )
 }
 
@@ -533,8 +627,7 @@ export function useMySchedules(userId: string | undefined, filter: 'upcoming' | 
     userId ? ['employee:schedules', userId, filter] : null,
     async () => {
       if (!userId) return []
-      const supabase = createUntypedClient()
-
+      
       let query = supabase
         .from('schedules')
         .select('*')
@@ -552,7 +645,7 @@ export function useMySchedules(userId: string | undefined, filter: 'upcoming' | 
       if (error) throw error
       return data || []
     },
-    defaultConfig
+    getDefaultConfig()
   )
 }
 
@@ -564,8 +657,7 @@ export function usePendingSchedulesCount(userId: string | undefined) {
     userId ? ['employee:schedules:pending:count', userId] : null,
     async () => {
       if (!userId) return 0
-      const supabase = createUntypedClient()
-
+      
       const { count, error } = await supabase
         .from('schedules')
         .select('*', { count: 'exact', head: true })
@@ -575,7 +667,7 @@ export function usePendingSchedulesCount(userId: string | undefined) {
       if (error) throw error
       return count || 0
     },
-    { ...defaultConfig, refreshInterval: 60000 } // Check every minute
+    { ...getDefaultConfig(), refreshInterval: getCacheTimings().refreshInterval } // Check every 2 minutes
   )
 }
 
@@ -586,8 +678,7 @@ export function useScheduleStats() {
   return useSWR(
     'admin:schedules:stats',
     async () => {
-      const supabase = createUntypedClient()
-      const today = new Date().toISOString().split('T')[0]
+            const today = new Date().toISOString().split('T')[0]
 
       const [pendingResult, cancelRequestResult, todayResult] = await Promise.all([
         supabase
@@ -611,7 +702,7 @@ export function useScheduleStats() {
         todaySchedules: todayResult.count || 0,
       }
     },
-    { ...defaultConfig, refreshInterval: 30000 }
+    { ...getDefaultConfig(), refreshInterval: getCacheTimings().refreshInterval }
   )
 }
 
