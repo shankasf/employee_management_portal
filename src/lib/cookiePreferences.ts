@@ -58,22 +58,23 @@ export function hasConsentChoice(): boolean {
 }
 
 // Cache timing constants based on user preference
+// PERFORMANCE: Increased intervals to reduce unnecessary network requests
 export const CACHE_TIMINGS = {
   // Standard timings (cookies not accepted)
   standard: {
-    freshTTL: 30 * 1000,        // 30 seconds
-    staleTTL: 5 * 60 * 1000,    // 5 minutes
-    dedupingInterval: 30000,    // 30 seconds
-    focusThrottleInterval: 60000, // 1 minute
-    refreshInterval: 120000,    // 2 minutes
+    freshTTL: 60 * 1000,        // 1 minute (was 30 seconds)
+    staleTTL: 10 * 60 * 1000,   // 10 minutes (was 5 minutes)
+    dedupingInterval: 60000,    // 1 minute (was 30 seconds)
+    focusThrottleInterval: 120000, // 2 minutes (was 1 minute)
+    refreshInterval: 300000,    // 5 minutes (was 2 minutes)
   },
   // Fast timings (cookies accepted)
   fast: {
-    freshTTL: 2 * 60 * 1000,    // 2 minutes
-    staleTTL: 15 * 60 * 1000,   // 15 minutes
-    dedupingInterval: 60000,    // 1 minute
-    focusThrottleInterval: 300000, // 5 minutes
-    refreshInterval: 300000,    // 5 minutes
+    freshTTL: 5 * 60 * 1000,    // 5 minutes (was 2 minutes)
+    staleTTL: 30 * 60 * 1000,   // 30 minutes (was 15 minutes)
+    dedupingInterval: 120000,   // 2 minutes (was 1 minute)
+    focusThrottleInterval: 600000, // 10 minutes (was 5 minutes)
+    refreshInterval: 600000,    // 10 minutes (was 5 minutes)
   },
 } as const
 

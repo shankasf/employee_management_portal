@@ -108,22 +108,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         const initAuth = async () => {
             try {
-                // First try getSession() which reads from storage
-                let { data: { session } } = await supabase.auth.getSession()
+                // PERFORMANCE: Only use getSession() which reads from cookie (no network call)
+                // Middleware already validates the session, so we don't need to call getUser() here
+                const { data: { session } } = await supabase.auth.getSession()
                 if (!mounted) return
-
-                // If no session found, try getUser() which validates against server
-                // This handles cases where cookies exist but local storage was cleared
-                if (!session) {
-                    const { data: { user: validatedUser } } = await supabase.auth.getUser()
-                    if (validatedUser && !mounted) return
-
-                    if (validatedUser) {
-                        // User is valid, refresh the session to sync state
-                        const { data: { session: refreshedSession } } = await supabase.auth.refreshSession()
-                        session = refreshedSession
-                    }
-                }
 
                 setSession(session)
                 setUser(session?.user ?? null)
