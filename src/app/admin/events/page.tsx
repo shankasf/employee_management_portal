@@ -74,8 +74,16 @@ export default function EventsPage() {
         } else {
             setEditingEvent(null)
             const now = new Date()
-            const defaultStart = new Date(now.getTime() + 60 * 60 * 1000).toISOString().slice(0, 16)
-            const defaultEnd = new Date(now.getTime() + 3 * 60 * 60 * 1000).toISOString().slice(0, 16)
+            const toLocalDateTimeString = (d: Date) => {
+                const y = d.getFullYear()
+                const mo = String(d.getMonth() + 1).padStart(2, '0')
+                const da = String(d.getDate()).padStart(2, '0')
+                const h = String(d.getHours()).padStart(2, '0')
+                const mi = String(d.getMinutes()).padStart(2, '0')
+                return `${y}-${mo}-${da}T${h}:${mi}`
+            }
+            const defaultStart = toLocalDateTimeString(new Date(now.getTime() + 60 * 60 * 1000))
+            const defaultEnd = toLocalDateTimeString(new Date(now.getTime() + 3 * 60 * 60 * 1000))
             setFormData({
                 title: '',
                 start_time: defaultStart,

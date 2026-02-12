@@ -1,40 +1,48 @@
 import { createBrowserClient } from "@supabase/ssr";
 import { Database } from "@/types/supabase";
 
-// Singleton instances to avoid creating new clients on every call
-let client: ReturnType<typeof createBrowserClient<Database>> | null = null;
-let untypedClient: ReturnType<typeof createBrowserClient> | null = null;
+// Suppress specific Supabase warnings that are informational only
+if (typeof window === 'undefined') {
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    const msg = String(args[0] || '');
+    // Skip Supabase getSession() and Node.js deprecation warnings
+    if (
+      msg.includes('supabase.auth.getSession()') ||
+      msg.includes('supabase.auth.onAuthStateChange()') ||
+      msg.includes('Node.js 18 and below are deprecated')
+    ) {
+      return;
+    }
+    originalWarn.apply(console, args);
+  };
+}
 
-// Auth configuration for proper session management
-const authConfig = {
-  auth: {
-    autoRefreshToken: true,
-    persistSession: true,
-    detectSessionInUrl: true,
-  },
-};
+// Single shared client instance to ensure auth state is consistent everywhere
+let client: ReturnType<typeof createBrowserClient<Database>> | null = null;
 
 export function createClient() {
   if (!client) {
     client = createBrowserClient<Database>(
       process.env.NEXT_PUBLIC_SUPABASE_URL!,
       process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      authConfig
+      {
+        auth: {
+          autoRefreshToken: true,
+          persistSession: true,
+          detectSessionInUrl: true,
+        },
+      }
     );
   }
   return client;
 }
 
-// Untyped client for flexibility until database types are regenerated
-export function createUntypedClient() {
-  if (!untypedClient) {
-    untypedClient = createBrowserClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-      authConfig
-    );
-  }
-  return untypedClient;
+// Untyped client - returns the SAME client instance as createClient()
+// This ensures auth state is shared across all usages
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function createUntypedClient(): any {
+  return createClient();
 }
 
 // Helper to check if an error is an auth error

@@ -149,8 +149,9 @@ export async function uploadPolicyMedia(
 export async function deletePolicyMedia(url: string) {
   const supabase = createClient();
 
-  // Extract file path from URL
-  const urlParts = url.split('/');
+  // Extract file path from URL (strip query params from signed URLs)
+  const urlWithoutQuery = url.split('?')[0];
+  const urlParts = urlWithoutQuery.split('/');
   const fileName = urlParts[urlParts.length - 1];
 
   const { error } = await supabase.storage

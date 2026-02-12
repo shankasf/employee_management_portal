@@ -8,7 +8,15 @@ import {
   sendAdminCancelledEmail,
   sendScheduleDeletedEmail,
 } from '@/lib/email'
-import { formatDate, formatTime } from '@/lib/utils'
+import {
+  sendScheduleAssignedSMS,
+  sendScheduleConfirmedSMS,
+  sendCancellationRequestSMS,
+  sendCancellationApprovedSMS,
+  sendAdminCancelledSMS,
+  sendScheduleDeletedSMS,
+} from '@/lib/sms'
+import { formatDate, formatTimeString } from '@/lib/utils'
 
 type NotificationType =
   | 'schedule_assigned'
@@ -34,7 +42,20 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
+    // Verify user is admin for admin-only notification types
     const body: NotifyRequest = await request.json()
+    const adminOnlyTypes: NotificationType[] = ['cancellation_approved', 'admin_cancelled', 'schedule_deleted', 'schedule_assigned']
+    if (adminOnlyTypes.includes(body.type)) {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single()
+
+      if ((profile as { role: string } | null)?.role !== 'admin') {
+        return NextResponse.json({ error: 'Forbidden - Admin only' }, { status: 403 })
+      }
+    }
     const { scheduleId, type, reason } = body
 
     if (!scheduleId || !type) {
@@ -49,6 +70,7 @@ export async function POST(request: NextRequest) {
         employee:employees (
           id,
           display_name,
+          phone_number,
           profiles (
             email,
             full_name
@@ -68,16 +90,32 @@ export async function POST(request: NextRequest) {
     const employee = scheduleData.employee as any
     const employeeName = employee?.display_name || employee?.profiles?.full_name || 'Employee'
     const employeeEmail = employee?.profiles?.email
+    const employeePhone = employee?.phone_number
+
+    // For employee-initiated actions, verify the requesting user owns this schedule
+    const employeeOnlyTypes: NotificationType[] = ['schedule_confirmed', 'cancellation_requested']
+    if (employeeOnlyTypes.includes(type)) {
+      const { data: empRecord } = await supabase
+        .from('employees')
+        .select('id')
+        .eq('profile_id', user.id)
+        .single()
+      if (!empRecord || (empRecord as { id: string }).id !== scheduleData.employee_id) {
+        return NextResponse.json({ error: 'Forbidden - Not your schedule' }, { status: 403 })
+      }
+    }
 
     if (!employeeEmail && type !== 'cancellation_requested') {
       return NextResponse.json({ error: 'Employee email not found' }, { status: 400 })
     }
 
     const scheduleDate = formatDate(scheduleData.schedule_date)
-    const startTime = formatTime(`${scheduleData.schedule_date}T${scheduleData.start_time}`)
-    const endTime = formatTime(`${scheduleData.schedule_date}T${scheduleData.end_time}`)
+    const startTime = formatTimeString(scheduleData.start_time)
+    const endTime = formatTimeString(scheduleData.end_time)
 
     let result: { success: boolean; error?: string } = { success: false }
+
+    let smsResult: { success: boolean; error?: string } = { success: false }
 
     switch (type) {
       case 'schedule_assigned':
@@ -89,6 +127,17 @@ export async function POST(request: NextRequest) {
           endTime,
           notes: scheduleData.description || undefined,
         })
+        // Send SMS if phone available
+        if (employeePhone) {
+          smsResult = await sendScheduleAssignedSMS({
+            employeeName,
+            employeePhone,
+            scheduleDate,
+            startTime,
+            endTime,
+            notes: scheduleData.description || undefined,
+          })
+        }
         break
 
       case 'schedule_confirmed':
@@ -99,10 +148,28 @@ export async function POST(request: NextRequest) {
           startTime,
           endTime,
         })
+        // Send SMS if phone available
+        if (employeePhone) {
+          smsResult = await sendScheduleConfirmedSMS({
+            employeeName,
+            employeePhone,
+            scheduleDate,
+            startTime,
+            endTime,
+          })
+        }
         break
 
       case 'cancellation_requested':
         result = await sendCancellationRequestEmail({
+          employeeName,
+          scheduleDate,
+          startTime,
+          endTime,
+          reason: reason || scheduleData.cancellation_reason || 'No reason provided',
+        })
+        // Send SMS to admins
+        smsResult = await sendCancellationRequestSMS({
           employeeName,
           scheduleDate,
           startTime,
@@ -119,6 +186,16 @@ export async function POST(request: NextRequest) {
           startTime,
           endTime,
         })
+        // Send SMS if phone available
+        if (employeePhone) {
+          smsResult = await sendCancellationApprovedSMS({
+            employeeName,
+            employeePhone,
+            scheduleDate,
+            startTime,
+            endTime,
+          })
+        }
         break
 
       case 'admin_cancelled':
@@ -130,6 +207,17 @@ export async function POST(request: NextRequest) {
           endTime,
           reason: reason || scheduleData.cancellation_reason || undefined,
         })
+        // Send SMS if phone available
+        if (employeePhone) {
+          smsResult = await sendAdminCancelledSMS({
+            employeeName,
+            employeePhone,
+            scheduleDate,
+            startTime,
+            endTime,
+            reason: reason || scheduleData.cancellation_reason || undefined,
+          })
+        }
         break
 
       case 'schedule_deleted':
@@ -141,10 +229,25 @@ export async function POST(request: NextRequest) {
           endTime,
           reason: reason || undefined,
         })
+        // Send SMS if phone available
+        if (employeePhone) {
+          smsResult = await sendScheduleDeletedSMS({
+            employeeName,
+            employeePhone,
+            scheduleDate,
+            startTime,
+            endTime,
+            reason: reason || undefined,
+          })
+        }
         break
 
       default:
         return NextResponse.json({ error: 'Invalid notification type' }, { status: 400 })
+    }
+
+    if (!smsResult.success && employeePhone) {
+      console.error('SMS send failed:', smsResult.error)
     }
 
     if (!result.success) {
@@ -166,12 +269,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       emailSent: result.success,
+      smsSent: smsResult.success,
     })
 
   } catch (error) {
     console.error('Error sending notification:', error)
     return NextResponse.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: 'Internal server error'
     }, { status: 500 })
   }
 }

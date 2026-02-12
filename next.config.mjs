@@ -1,12 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'standalone',
-
   // PERFORMANCE: Enable React strict mode for better debugging in development
   reactStrictMode: true,
 
-  // PERFORMANCE: Optimize package imports for better tree-shaking
+  // Enable instrumentation for warning suppression
   experimental: {
+    instrumentationHook: true,
     optimizePackageImports: ['@supabase/supabase-js', '@supabase/ssr', 'swr'],
   },
 

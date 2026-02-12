@@ -203,9 +203,15 @@ export async function deleteChecklistItem(checklistId: string) {
 // Get today's events
 export async function getTodayEvents() {
   const supabase = createClient();
-  const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).toISOString();
-  const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).toISOString();
+  // Use NY timezone for "today" boundaries
+  const nyDateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }) // YYYY-MM-DD
+  const noon = new Date(`${nyDateStr}T12:00:00Z`)
+  const nyH = parseInt(noon.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit' }))
+  const utcH = parseInt(noon.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit' }))
+  const offset = nyH - utcH
+  const offsetStr = `${offset < 0 ? '-' : '+'}${String(Math.abs(offset)).padStart(2, '0')}:00`
+  const startOfDay = new Date(`${nyDateStr}T00:00:00${offsetStr}`).toISOString();
+  const endOfDay = new Date(`${nyDateStr}T23:59:59.999${offsetStr}`).toISOString();
 
   const { data, error } = await supabase
     .from("events")

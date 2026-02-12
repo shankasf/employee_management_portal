@@ -3,6 +3,7 @@ import localFont from "next/font/local";
 import "./globals.css";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { CookieBanner } from "@/components/CookieBanner";
+import ChunkErrorHandler from "@/components/ChunkErrorHandler";
 
 // PERFORMANCE: Use font-display: swap for faster text rendering
 // This shows fallback font immediately while custom fonts load
@@ -37,6 +38,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         <AuthProvider>
+          <ChunkErrorHandler />
           {children}
           <CookieBanner />
         </AuthProvider>

@@ -2,14 +2,12 @@
 
 import { useState } from 'react'
 import Link from 'next/link'
-import { createClient } from '@/lib/supabase/client'
 
 export default function ForgotPasswordPage() {
     const [email, setEmail] = useState('')
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [success, setSuccess] = useState(false)
-    const supabase = createClient()
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -17,34 +15,23 @@ export default function ForgotPasswordPage() {
         setError(null)
 
         try {
-            // First check if user exists in the system
-            const response = await fetch('/api/auth/check-user', {
+            // Send password reset request to our custom API (uses AWS SES)
+            const response = await fetch('/api/auth/forgot-password', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email }),
+                body: JSON.stringify({ email: email.toLowerCase().trim() }),
             })
 
             const data = await response.json()
 
-            if (!data.exists) {
-                setError('No account found with this email address.')
-                setLoading(false)
-                return
-            }
-
-            // Send password reset email
-            const { error } = await supabase.auth.resetPasswordForEmail(email, {
-                redirectTo: `${window.location.origin}/reset-password`,
-            })
-
-            if (error) {
-                setError(error.message)
+            if (!response.ok) {
+                setError(data.error || 'Failed to send reset email')
             } else {
                 setSuccess(true)
             }
         } catch (err) {
             setError('An unexpected error occurred. Please try again.')
-            console.error(err)
+            console.error('[ForgotPassword] Error:', err)
         } finally {
             setLoading(false)
         }
@@ -62,7 +49,7 @@ export default function ForgotPasswordPage() {
                         </div>
                         <h1 className="text-xl sm:text-2xl font-bold">Check your email</h1>
                         <p className="card-description text-sm mt-2">
-                            We&apos;ve sent a password reset link to <strong>{email}</strong>
+                            If an account exists for <strong>{email}</strong>, we&apos;ve sent a password reset link.
                         </p>
                     </div>
                     <div className="card-content">

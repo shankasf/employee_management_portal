@@ -12,14 +12,17 @@
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.86.2",
     "clsx": "^2.1.1",
+    "dompurify": "^3.3.1",
     "next": "14.2.33",
     "nodemailer": "^7.0.12",
     "react": "^18",
     "react-dom": "^18",
     "swr": "^2.3.8",
-    "tailwind-merge": "^3.4.0"
+    "tailwind-merge": "^3.4.0",
+    "twilio": "^5.12.0"
   },
   "devDependencies": {
+    "@types/dompurify": "^3.0.5",
     "@types/node": "^20",
     "@types/nodemailer": "^7.0.5",
     "@types/react": "^18",

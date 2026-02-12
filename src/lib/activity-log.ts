@@ -1,0 +1,119 @@
+import { createClient } from '@supabase/supabase-js'
+
+// Activity log types
+export type ActivityAction =
+    | 'employee_created'
+    | 'employee_deleted'
+    | 'employee_deactivated'
+    | 'employee_reactivated'
+    | 'employee_updated'
+    | 'device_cleared'
+    | 'password_reset_requested'
+    | 'password_reset_completed'
+    | 'schedule_created'
+    | 'schedule_deleted'
+    | 'task_created'
+    | 'task_deleted'
+    | 'event_created'
+    | 'event_deleted'
+    | 'policy_created'
+    | 'policy_deleted'
+
+export type EntityType =
+    | 'employee'
+    | 'schedule'
+    | 'task'
+    | 'event'
+    | 'policy'
+    | 'attendance'
+
+export interface ActivityLogEntry {
+    adminId: string
+    adminEmail: string
+    action: ActivityAction
+    entityType: EntityType
+    entityId?: string
+    entityName?: string
+    details?: Record<string, unknown>
+    ipAddress?: string
+    userAgent?: string
+}
+
+// Create admin client for logging (uses service role)
+function getAdminClient() {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+    const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+
+    return createClient(supabaseUrl, serviceRoleKey, {
+        auth: {
+            autoRefreshToken: false,
+            persistSession: false
+        }
+    })
+}
+
+/**
+ * Log an admin activity to the database
+ * This function is fire-and-forget - errors are logged but don't block the main operation
+ */
+export async function logActivity(entry: ActivityLogEntry): Promise<void> {
+    try {
+        const adminClient = getAdminClient()
+
+        const { error } = await adminClient.from('activity_logs').insert({
+            admin_id: entry.adminId,
+            admin_email: entry.adminEmail,
+            action: entry.action,
+            entity_type: entry.entityType,
+            entity_id: entry.entityId || null,
+            entity_name: entry.entityName || null,
+            details: entry.details || null,
+            ip_address: entry.ipAddress || null,
+            user_agent: entry.userAgent || null,
+        })
+        if (error) {
+            console.error('[ActivityLog] Insert error:', error.message)
+        }
+    } catch (error) {
+        // Log to console but don't throw - activity logging should not block operations
+        console.error('[ActivityLog] Failed to log activity:', error)
+    }
+}
+
+/**
+ * Helper to extract IP and User Agent from request headers
+ */
+export function getRequestInfo(headers: Headers): { ipAddress?: string; userAgent?: string } {
+    const ipAddress = headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+        headers.get('x-real-ip') ||
+        undefined
+
+    const userAgent = headers.get('user-agent') || undefined
+
+    return { ipAddress, userAgent }
+}
+
+/**
+ * Format action for display
+ */
+export function formatAction(action: ActivityAction): string {
+    const actionLabels: Record<ActivityAction, string> = {
+        employee_created: 'Created employee',
+        employee_deleted: 'Deleted employee',
+        employee_deactivated: 'Deactivated employee',
+        employee_reactivated: 'Reactivated employee',
+        employee_updated: 'Updated employee',
+        device_cleared: 'Cleared device registration',
+        password_reset_requested: 'Requested password reset',
+        password_reset_completed: 'Completed password reset',
+        schedule_created: 'Created schedule',
+        schedule_deleted: 'Deleted schedule',
+        task_created: 'Created task',
+        task_deleted: 'Deleted task',
+        event_created: 'Created event',
+        event_deleted: 'Deleted event',
+        policy_created: 'Created policy',
+        policy_deleted: 'Deleted policy',
+    }
+    return actionLabels[action] || action
+}

@@ -6,11 +6,8 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
 
-  // Get the origin from headers for proper redirect (handles proxies)
-  const forwardedHost = request.headers.get("x-forwarded-host");
-  const forwardedProto = request.headers.get("x-forwarded-proto") || "https";
-  const host = forwardedHost || request.headers.get("host") || "localhost:3000";
-  const origin = `${forwardedProto}://${host}`;
+  // Use trusted origin from environment variable, not from request headers
+  const origin = process.env.NEXT_PUBLIC_APP_URL || 'https://admin.playfunia.com';
 
   if (code) {
     const cookieStore = await cookies();
@@ -37,13 +34,10 @@ export async function GET(request: NextRequest) {
 
     const { data: { session }, error } = await supabase.auth.exchangeCodeForSession(code);
 
-    console.log('[Auth Callback] Origin:', origin);
-    console.log('[Auth Callback] Session user:', session?.user?.email);
-    console.log('[Auth Callback] Error:', error?.message);
-    console.log('[Auth Callback] Cookies to set:', cookiesToSet.length);
+    console.log(`[${new Date().toISOString()}] [AUTH] Callback received | origin: ${origin} | user: ${session?.user?.email} | error: ${error?.message || 'none'} | cookies: ${cookiesToSet.length}`);
 
     if (error) {
-      console.error('Auth callback error:', error);
+      console.error(`[${new Date().toISOString()}] [AUTH] Callback error:`, error);
       return NextResponse.redirect(`${origin}/login?error=auth_failed`);
     }
 
@@ -65,7 +59,7 @@ export async function GET(request: NextRequest) {
       );
 
       if (!session.user.email) {
-        console.error('User session has no email');
+        console.error(`[${new Date().toISOString()}] [AUTH] User session has no email`);
         await supabase.auth.signOut();
         return NextResponse.redirect(`${origin}/login?error=no_email`);
       }
@@ -79,7 +73,7 @@ export async function GET(request: NextRequest) {
       if (profileError || !profile) {
         // User doesn't exist in the system - they're not an employee
         // Sign them out and redirect with error
-        console.log('Google sign-in attempted by non-existing user:', session.user.email);
+        console.log(`[${new Date().toISOString()}] [AUTH] Google sign-in blocked - user not in system: ${session.user.email}`);
 
         await supabase.auth.signOut();
 
@@ -88,7 +82,7 @@ export async function GET(request: NextRequest) {
         try {
           await serviceClient.auth.admin.deleteUser(session.user.id);
         } catch (deleteErr) {
-          console.error('Failed to delete non-employee user:', deleteErr);
+          console.error(`[${new Date().toISOString()}] [AUTH] Failed to delete non-employee user:`, deleteErr);
         }
 
         return NextResponse.redirect(`${origin}/login?error=not_existing_user`);
@@ -98,6 +92,7 @@ export async function GET(request: NextRequest) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const profileData = profile as any;
       const redirectPath = profileData.role === 'admin' ? '/admin' : '/employee';
+      console.log(`[${new Date().toISOString()}] [AUTH] Login successful | user: ${session.user.email} | role: ${profileData.role} | redirect: ${redirectPath}`);
 
       // Create response and set all accumulated cookies with proper options
       const response = NextResponse.redirect(`${origin}${redirectPath}`);
@@ -106,7 +101,7 @@ export async function GET(request: NextRequest) {
           ...options,
           path: '/',
           sameSite: 'lax',
-          secure: forwardedProto === 'https',
+          secure: origin.startsWith('https'),
         });
       });
       return response;

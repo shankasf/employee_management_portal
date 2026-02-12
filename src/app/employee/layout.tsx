@@ -1,50 +1,86 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import { useAuth } from '@/contexts/AuthContext'
 import { ReactNode, useState, useEffect } from 'react'
+import { logPageView, logButtonClick } from '@/lib/usage-log'
+import { getSignedStorageUrl } from '@/lib/utils'
 
 const employeeNavItems = [
     { name: 'Dashboard', href: '/employee', icon: '🏠' },
     { name: 'My Schedule', href: '/employee/schedules', icon: '📅' },
     { name: 'Check-In Tools', href: '/employee/checkin', icon: '📋' },
-    { name: 'My Attendance', href: '/employee/attendance', icon: '⏰' },
+    { name: 'My Time Card', href: '/employee/attendance', icon: '🕐' },
     { name: 'My Tasks', href: '/employee/tasks', icon: '✅' },
 ]
 
 export default function EmployeeLayout({ children }: { children: ReactNode }) {
     const pathname = usePathname()
-    const router = useRouter()
     const { profile, employee, signOut, isLoading, user } = useAuth()
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [signingOut, setSigningOut] = useState(false)
+    const [loadingTimeout, setLoadingTimeout] = useState(false)
+    const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null)
 
-    // Redirect to login if not authenticated
+    // Load profile picture when employee changes
     useEffect(() => {
-        if (!isLoading && !user) {
-            router.replace('/login')
+        let stale = false
+        if (employee?.profile_picture_url) {
+            getSignedStorageUrl(employee.profile_picture_url, 'employee-docs')
+                .then(url => {
+                    if (!stale) setProfilePicUrl(url)
+                })
+                .catch(() => {
+                    if (!stale) setProfilePicUrl(null)
+                })
+        } else {
+            // Fallback to Supabase auth user metadata avatar
+            const metaAvatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture || null
+            setProfilePicUrl(metaAvatar)
         }
-    }, [isLoading, user, router])
+        return () => { stale = true }
+    }, [employee?.profile_picture_url, user?.user_metadata?.avatar_url, user?.user_metadata?.picture])
 
-    const handleSignOut = () => {
+    // Log page views when route changes
+    useEffect(() => {
+        const pageName = employeeNavItems.find(item => item.href === pathname)?.name || pathname
+        logPageView(pageName, 'navigation')
+    }, [pathname])
+
+    // Add timeout to prevent infinite loading
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            if (isLoading) {
+                setLoadingTimeout(true)
+            }
+        }, 5000) // 5 second timeout
+        return () => clearTimeout(timer)
+    }, [isLoading])
+
+    // Note: Middleware handles auth redirects - no client-side redirect needed here
+
+    const handleSignOut = async () => {
         if (signingOut) return
         setSigningOut(true)
-
-        signOut().catch((err) => console.error('Error during sign out:', err)).finally(() => {
-            setSigningOut(false)
-        })
-
         setSidebarOpen(false)
-        router.replace('/login')
-        setTimeout(() => {
-            if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-                window.location.replace('/login')
-            }
-        }, 150)
+
+        // Log sign out action
+        logButtonClick('Sign Out', 'auth')
+
+        try {
+            // Wait for signOut to complete before redirecting to avoid race condition with middleware
+            await signOut()
+        } catch (err) {
+            console.error('Error during sign out:', err)
+        } finally {
+            setSigningOut(false)
+            // Use hard navigation to ensure middleware sees cleared cookies
+            window.location.href = '/login'
+        }
     }
 
-    if (isLoading) {
+    if (isLoading && !loadingTimeout) {
         return (
             <div className="min-h-screen flex items-center justify-center">
                 <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
@@ -116,9 +152,18 @@ export default function EmployeeLayout({ children }: { children: ReactNode }) {
                     {/* User section */}
                     <div className="border-t p-3 sm:p-4">
                         <div className="flex items-center gap-3 mb-3">
-                            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold text-sm sm:text-base">
-                                {employee?.display_name?.[0] || profile?.full_name?.[0] || 'E'}
-                            </div>
+                            {profilePicUrl ? (
+                                <img
+                                    src={profilePicUrl}
+                                    alt="Profile"
+                                    className="w-9 h-9 sm:w-10 sm:h-10 rounded-full object-cover flex-shrink-0"
+                                    onError={() => setProfilePicUrl(null)}
+                                />
+                            ) : (
+                                <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold text-sm sm:text-base flex-shrink-0">
+                                    {employee?.display_name?.[0] || profile?.full_name?.[0] || 'E'}
+                                </div>
+                            )}
                             <div className="flex-1 min-w-0">
                                 <p className="font-medium truncate text-sm sm:text-base">
                                     {employee?.display_name || profile?.full_name || 'Employee'}

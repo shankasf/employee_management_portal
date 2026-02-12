@@ -1,27 +1,17 @@
 -- =====================================================
--- PlayFunia Employee Management - COMPLETE DATABASE SCHEMA
+-- PlayFunia Employee Management - COMPLETE DATABASE MIGRATION
 -- =====================================================
--- Version 2.0 - Final Complete Schema
+-- This is a SINGLE consolidated migration file
+-- SAFE TO RUN MULTIPLE TIMES - Uses IF NOT EXISTS and CREATE OR REPLACE
+-- NO DATA LOSS - Only adds/modifies structure, never deletes data
 -- =====================================================
--- FEATURES:
---   1. Employee management with full details (address, DOB, ID docs, shift times)
---   2. Attendance tracking with clock in/out
---   3. Task management with assignments
---   4. Event scheduling with staff assignments
---   5. Schedule system with confirmation workflow & email notifications
---   6. Policy management with media (image/video) support
---   7. Staff notes and transactions
+-- Last Updated: January 2026
+-- Includes:
+--   - Complete schema (000)
+--   - Performance indexes (001)
+--   - Performance RPCs (002)
+--   - Password reset tokens (003)
 -- =====================================================
--- NOTE: Waiver form functionality has been REMOVED
--- =====================================================
--- RUN THIS IN SUPABASE SQL EDITOR TO SET UP EVERYTHING
--- =====================================================
-
--- =====================================================
--- PART 0: CLEANUP OLD TABLES
--- =====================================================
-DROP FUNCTION IF EXISTS search_waivers_by_phone(TEXT);
-DROP TABLE IF EXISTS waivers CASCADE;
 
 -- =====================================================
 -- PART 1: EXTENSIONS
@@ -66,6 +56,20 @@ CREATE TABLE IF NOT EXISTS profiles (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Add password reset columns (003 migration)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'profiles' AND column_name = 'reset_token_hash') THEN
+        ALTER TABLE profiles ADD COLUMN reset_token_hash TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'profiles' AND column_name = 'reset_token_expires') THEN
+        ALTER TABLE profiles ADD COLUMN reset_token_expires TIMESTAMPTZ;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'profiles' AND column_name = 'email_confirmed_at') THEN
+        ALTER TABLE profiles ADD COLUMN email_confirmed_at TIMESTAMPTZ;
+    END IF;
+END $$;
 
 DROP TRIGGER IF EXISTS profiles_updated_at ON profiles;
 CREATE TRIGGER profiles_updated_at
@@ -152,6 +156,23 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'id_document_url') THEN
         ALTER TABLE employees ADD COLUMN id_document_url TEXT;
     END IF;
+    -- Device registration columns
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'registered_device_id') THEN
+        ALTER TABLE employees ADD COLUMN registered_device_id TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'device_registered_at') THEN
+        ALTER TABLE employees ADD COLUMN device_registered_at TIMESTAMPTZ;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'device_name') THEN
+        ALTER TABLE employees ADD COLUMN device_name TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'hourly_rate') THEN
+        ALTER TABLE employees ADD COLUMN hourly_rate NUMERIC(10,2);
+    END IF;
+    -- Profile picture column
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'profile_picture_url') THEN
+        ALTER TABLE employees ADD COLUMN profile_picture_url TEXT;
+    END IF;
 END $$;
 
 DROP TRIGGER IF EXISTS employees_updated_at ON employees;
@@ -174,6 +195,56 @@ CREATE TABLE IF NOT EXISTS attendance_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Add attendance location/device tracking columns
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_lat') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_lat NUMERIC(10,7);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_lng') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_lng NUMERIC(10,7);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_accuracy') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_accuracy NUMERIC(10,2);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_location_status') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_location_status TEXT DEFAULT 'unknown';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_lat') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_lat NUMERIC(10,7);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_lng') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_lng NUMERIC(10,7);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_accuracy') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_accuracy NUMERIC(10,2);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_location_status') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_location_status TEXT DEFAULT 'unknown';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'break_minutes') THEN
+        ALTER TABLE attendance_logs ADD COLUMN break_minutes INTEGER DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'work_type') THEN
+        ALTER TABLE attendance_logs ADD COLUMN work_type TEXT DEFAULT 'regular';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'notes') THEN
+        ALTER TABLE attendance_logs ADD COLUMN notes TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_device_id') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_device_id TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_device_name') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_in_device_name TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_device_id') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_device_id TEXT;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_device_name') THEN
+        ALTER TABLE attendance_logs ADD COLUMN clock_out_device_name TEXT;
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_clock_in ON attendance_logs (employee_id, clock_in);
 
@@ -209,6 +280,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Add reference_images and reference_videos columns (safe migration - preserves existing data)
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reference_images TEXT[];
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS reference_videos TEXT[];
+
 DROP TRIGGER IF EXISTS tasks_updated_at ON tasks;
 CREATE TRIGGER tasks_updated_at
   BEFORE UPDATE ON tasks
@@ -231,6 +306,14 @@ CREATE TABLE IF NOT EXISTS task_instances (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Add photo_urls column for multiple photos support
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'task_instances' AND column_name = 'photo_urls') THEN
+        ALTER TABLE task_instances ADD COLUMN photo_urls TEXT[];
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_task_instances_employee_date ON task_instances (employee_id, scheduled_date);
 
@@ -315,7 +398,7 @@ CREATE TABLE IF NOT EXISTS staff_notes (
 );
 
 -- -----------------------------------------------------
--- Table: policy_strips (with media support)
+-- Table: policy_strips
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS policy_strips (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -350,7 +433,7 @@ CREATE TRIGGER policy_strips_updated_at
   EXECUTE FUNCTION update_updated_at_column();
 
 -- -----------------------------------------------------
--- Table: schedules (NEW - Flexible scheduling with confirmation)
+-- Table: schedules
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS schedules (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -385,7 +468,7 @@ CREATE TRIGGER schedules_updated_at
   EXECUTE FUNCTION update_updated_at_column();
 
 -- -----------------------------------------------------
--- Table: schedule_email_logs (NEW)
+-- Table: schedule_email_logs
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS schedule_email_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -401,7 +484,7 @@ CREATE TABLE IF NOT EXISTS schedule_email_logs (
 CREATE INDEX IF NOT EXISTS idx_schedule_email_logs_schedule ON schedule_email_logs (schedule_id);
 
 -- -----------------------------------------------------
--- Table: notification_recipients (NEW)
+-- Table: notification_recipients
 -- -----------------------------------------------------
 CREATE TABLE IF NOT EXISTS notification_recipients (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -412,8 +495,98 @@ CREATE TABLE IF NOT EXISTS notification_recipients (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- -----------------------------------------------------
+-- Table: activity_logs (Admin activity audit trail)
+-- -----------------------------------------------------
+CREATE TABLE IF NOT EXISTS activity_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    admin_id UUID REFERENCES profiles (id) ON DELETE SET NULL,
+    admin_email TEXT,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id UUID,
+    entity_name TEXT,
+    details JSONB,
+    ip_address TEXT,
+    user_agent TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_activity_logs_admin ON activity_logs(admin_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_action ON activity_logs(action);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_entity ON activity_logs(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_created ON activity_logs(created_at DESC);
+
+-- RLS for activity_logs - only admins can read
+ALTER TABLE activity_logs ENABLE ROW LEVEL SECURITY;
+
+-- -----------------------------------------------------
+-- Table: usage_logs (User interaction tracking)
+-- -----------------------------------------------------
+CREATE TABLE IF NOT EXISTS usage_logs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID REFERENCES profiles (id) ON DELETE SET NULL,
+    user_email TEXT,
+    user_role TEXT,
+    event_type TEXT NOT NULL,
+    event_category TEXT NOT NULL,
+    event_action TEXT NOT NULL,
+    event_label TEXT,
+    page_path TEXT,
+    page_title TEXT,
+    metadata JSONB,
+    session_id TEXT,
+    ip_address TEXT,
+    user_agent TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_logs_user ON usage_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_event ON usage_logs(event_type, event_category);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_created ON usage_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_page ON usage_logs(page_path);
+
+-- RLS for usage_logs - only admins can read
+ALTER TABLE usage_logs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Admins can view usage logs" ON usage_logs;
+CREATE POLICY "Admins can view usage logs" ON usage_logs
+    FOR SELECT USING (
+        EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'admin')
+    );
+
+DROP POLICY IF EXISTS "Service role can insert usage logs" ON usage_logs;
+CREATE POLICY "Service role can insert usage logs" ON usage_logs
+    FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Admins can view activity logs" ON activity_logs;
+CREATE POLICY "Admins can view activity logs" ON activity_logs
+    FOR SELECT USING (
+        EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'admin')
+    );
+
+DROP POLICY IF EXISTS "Service role can insert activity logs" ON activity_logs;
+CREATE POLICY "Service role can insert activity logs" ON activity_logs
+    FOR INSERT WITH CHECK (true);
+
 -- =====================================================
--- PART 4: ROW LEVEL SECURITY (RLS)
+-- PART 4: PERFORMANCE INDEXES (001 + 002 migrations)
+-- =====================================================
+
+CREATE INDEX IF NOT EXISTS idx_employees_is_active ON employees(is_active) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_attendance_logs_open ON attendance_logs(employee_id) WHERE clock_out IS NULL;
+CREATE INDEX IF NOT EXISTS idx_policy_strips_active ON policy_strips(is_active, created_at DESC) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_events_start_time ON events(start_time);
+CREATE INDEX IF NOT EXISTS idx_event_staff_employee ON event_staff_assignments(employee_id);
+CREATE INDEX IF NOT EXISTS idx_profiles_role ON profiles(id, role);
+CREATE INDEX IF NOT EXISTS idx_schedules_date_status ON schedules(schedule_date, status);
+CREATE INDEX IF NOT EXISTS idx_attendance_logs_clock_in ON attendance_logs(clock_in);
+
+-- Password reset token index (003 migration)
+CREATE INDEX IF NOT EXISTS idx_profiles_reset_token ON profiles(reset_token_hash) WHERE reset_token_hash IS NOT NULL;
+
+-- =====================================================
+-- PART 5: ROW LEVEL SECURITY (RLS)
 -- =====================================================
 
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
@@ -465,6 +638,8 @@ DROP POLICY IF EXISTS "Admins can update employees" ON employees;
 CREATE POLICY "Admins can update employees" ON employees FOR UPDATE USING (is_admin());
 DROP POLICY IF EXISTS "Admins can delete employees" ON employees;
 CREATE POLICY "Admins can delete employees" ON employees FOR DELETE USING (is_admin());
+DROP POLICY IF EXISTS "Employees can update own device" ON employees;
+CREATE POLICY "Employees can update own device" ON employees FOR UPDATE USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
 
 -- Attendance Logs Policies
 DROP POLICY IF EXISTS "Employees can view own attendance" ON attendance_logs;
@@ -599,7 +774,7 @@ DROP POLICY IF EXISTS "Admins can manage notification recipients" ON notificatio
 CREATE POLICY "Admins can manage notification recipients" ON notification_recipients FOR ALL USING (is_admin());
 
 -- =====================================================
--- PART 5: DATABASE FUNCTIONS (RPC)
+-- PART 6: DATABASE FUNCTIONS (RPC)
 -- =====================================================
 
 CREATE OR REPLACE FUNCTION get_open_attendance()
@@ -675,14 +850,18 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 DROP FUNCTION IF EXISTS get_admin_dashboard_stats();
 CREATE OR REPLACE FUNCTION get_admin_dashboard_stats()
 RETURNS TABLE (active_employees BIGINT, clocked_in_today BIGINT, tasks_completed_today BIGINT, tasks_pending_today BIGINT, events_today BIGINT, events_this_week BIGINT, schedules_pending_confirmation BIGINT, schedules_cancellation_requested BIGINT) AS $$
+DECLARE
+  v_today DATE := (NOW() AT TIME ZONE 'America/New_York')::DATE;
+  v_now TIMESTAMPTZ := NOW();
+  v_week_end TIMESTAMPTZ := v_now + INTERVAL '7 days';
 BEGIN
   RETURN QUERY SELECT
     (SELECT COUNT(*) FROM employees WHERE is_active = TRUE),
-    (SELECT COUNT(*) FROM attendance_logs WHERE DATE(clock_in) = CURRENT_DATE AND clock_out IS NULL),
-    (SELECT COUNT(*) FROM task_instances WHERE scheduled_date = CURRENT_DATE AND status = 'completed'),
-    (SELECT COUNT(*) FROM task_instances WHERE scheduled_date = CURRENT_DATE AND status = 'pending'),
-    (SELECT COUNT(*) FROM events WHERE DATE(start_time) = CURRENT_DATE),
-    (SELECT COUNT(*) FROM events WHERE start_time >= CURRENT_DATE AND start_time < CURRENT_DATE + INTERVAL '7 days'),
+    (SELECT COUNT(*) FROM attendance_logs WHERE DATE(clock_in AT TIME ZONE 'America/New_York') = v_today AND clock_out IS NULL),
+    (SELECT COUNT(*) FROM task_instances WHERE scheduled_date = v_today AND status = 'completed'),
+    (SELECT COUNT(*) FROM task_instances WHERE scheduled_date = v_today AND status = 'pending'),
+    (SELECT COUNT(*) FROM events WHERE DATE(start_time AT TIME ZONE 'America/New_York') = v_today),
+    (SELECT COUNT(*) FROM events WHERE start_time >= v_now AND start_time < v_week_end),
     (SELECT COUNT(*) FROM schedules WHERE status = 'pending'),
     (SELECT COUNT(*) FROM schedules WHERE status = 'cancellation_requested');
 END;
@@ -744,8 +923,181 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
+-- Device management functions
+CREATE OR REPLACE FUNCTION register_device(p_device_id TEXT, p_device_name TEXT DEFAULT NULL)
+RETURNS BOOLEAN AS $$
+BEGIN
+    UPDATE employees
+    SET registered_device_id = p_device_id,
+        device_registered_at = NOW(),
+        device_name = COALESCE(p_device_name, 'Unknown Device')
+    WHERE id = auth.uid();
+    IF NOT FOUND THEN RAISE EXCEPTION 'Employee not found'; END IF;
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION check_device(p_device_id TEXT)
+RETURNS TABLE (is_registered BOOLEAN, registered_device_id TEXT, device_name TEXT) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        (e.registered_device_id IS NOT NULL AND e.registered_device_id = p_device_id) AS is_registered,
+        e.registered_device_id,
+        e.device_name
+    FROM employees e
+    WHERE e.id = auth.uid();
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION admin_clear_device(p_employee_id UUID)
+RETURNS BOOLEAN AS $$
+BEGIN
+    IF NOT is_admin() THEN RAISE EXCEPTION 'Only admins can clear device registration'; END IF;
+    UPDATE employees SET registered_device_id = NULL, device_registered_at = NULL, device_name = NULL WHERE id = p_employee_id;
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
 -- =====================================================
--- PART 6: VIEWS
+-- PART 7: PERFORMANCE RPC FUNCTIONS (002 migration)
+-- =====================================================
+
+CREATE OR REPLACE FUNCTION get_employee_dashboard_data(p_user_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    result JSONB;
+    v_today DATE := CURRENT_DATE;
+BEGIN
+    SELECT jsonb_build_object(
+        'open_attendance', (
+            SELECT jsonb_build_object('id', id, 'clock_in', clock_in)
+            FROM attendance_logs WHERE employee_id = p_user_id AND clock_out IS NULL
+            ORDER BY clock_in DESC LIMIT 1
+        ),
+        'today_tasks', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'id', ti.id, 'task_id', ti.task_id, 'status', ti.status,
+                'title', t.title, 'description', t.description, 'location', t.location,
+                'cutoff_time', t.cutoff_time, 'requires_photo', t.requires_photo,
+                'requires_video', t.requires_video, 'requires_notes', t.requires_notes
+            ))
+            FROM task_instances ti JOIN tasks t ON t.id = ti.task_id
+            WHERE ti.employee_id = p_user_id AND ti.scheduled_date = v_today LIMIT 10
+        ), '[]'::jsonb),
+        'upcoming_events', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'id', e.id, 'title', e.title, 'start_time', e.start_time,
+                'end_time', e.end_time, 'room', e.room, 'my_role', esa.role
+            ))
+            FROM event_staff_assignments esa JOIN events e ON e.id = esa.event_id
+            WHERE esa.employee_id = p_user_id AND e.start_time >= NOW()
+            ORDER BY e.start_time LIMIT 5
+        ), '[]'::jsonb),
+        'active_policies', COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'id', id, 'title', title, 'content', content, 'category', category
+            ))
+            FROM policy_strips WHERE is_active = true ORDER BY created_at DESC LIMIT 5
+        ), '[]'::jsonb),
+        'device_info', (
+            SELECT jsonb_build_object('registered_device_id', registered_device_id, 'device_name', device_name)
+            FROM employees WHERE id = p_user_id
+        )
+    ) INTO result;
+    RETURN result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION get_admin_schedules_page_data(
+    p_start_date DATE DEFAULT CURRENT_DATE,
+    p_end_date DATE DEFAULT CURRENT_DATE + INTERVAL '30 days',
+    p_status TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    result JSONB;
+BEGIN
+    SELECT jsonb_build_object(
+        'schedules', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'id', s.id, 'employee_id', s.employee_id, 'schedule_date', s.schedule_date,
+                    'start_time', s.start_time, 'end_time', s.end_time, 'title', s.title,
+                    'description', s.description, 'location', s.location, 'status', s.status,
+                    'cancellation_reason', s.cancellation_reason,
+                    'employee', jsonb_build_object(
+                        'id', e.id, 'display_name', e.display_name, 'position', e.position,
+                        'profiles', jsonb_build_object('email', p.email, 'full_name', p.full_name)
+                    )
+                ) ORDER BY s.schedule_date, s.start_time
+            )
+            FROM schedules s
+            LEFT JOIN employees e ON e.id = s.employee_id
+            LEFT JOIN profiles p ON p.id = s.employee_id
+            WHERE s.schedule_date >= p_start_date AND s.schedule_date <= p_end_date
+              AND (p_status IS NULL OR s.status = p_status)
+        ), '[]'::jsonb),
+        'employees', COALESCE((
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'id', e.id, 'display_name', e.display_name,
+                    'profiles', jsonb_build_object('full_name', p.full_name)
+                ) ORDER BY e.display_name
+            )
+            FROM employees e LEFT JOIN profiles p ON p.id = e.id WHERE e.is_active = true
+        ), '[]'::jsonb),
+        'stats', (
+            SELECT jsonb_build_object(
+                'total', COUNT(*),
+                'pending', COUNT(*) FILTER (WHERE status = 'pending'),
+                'confirmed', COUNT(*) FILTER (WHERE status = 'confirmed'),
+                'cancellation_requested', COUNT(*) FILTER (WHERE status = 'cancellation_requested')
+            )
+            FROM schedules WHERE schedule_date >= p_start_date AND schedule_date <= p_end_date
+        )
+    ) INTO result;
+    RETURN result;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION get_schedule_stats()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+    result JSONB;
+    v_today DATE := CURRENT_DATE;
+BEGIN
+    SELECT jsonb_build_object(
+        'pending', COUNT(*) FILTER (WHERE status = 'pending'),
+        'cancellation_requested', COUNT(*) FILTER (WHERE status = 'cancellation_requested'),
+        'today_schedules', COUNT(*) FILTER (WHERE schedule_date = v_today AND status != 'cancelled')
+    ) INTO result FROM schedules;
+    RETURN result;
+END;
+$$;
+
+-- Grant execute permissions
+GRANT EXECUTE ON FUNCTION register_device(TEXT, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION check_device(TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION admin_clear_device(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION get_employee_dashboard_data(UUID) TO authenticated;
+GRANT EXECUTE ON FUNCTION get_admin_schedules_page_data(DATE, DATE, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION get_schedule_stats() TO authenticated;
+
+-- =====================================================
+-- PART 8: VIEWS
 -- =====================================================
 
 CREATE OR REPLACE VIEW employee_recent_transactions AS
@@ -755,12 +1107,13 @@ FROM transactions t WHERE t.handled_by_employee = auth.uid() ORDER BY t.created_
 GRANT SELECT ON employee_recent_transactions TO authenticated;
 
 -- =====================================================
--- PART 7: STORAGE SETUP
+-- PART 9: STORAGE BUCKETS
 -- =====================================================
 
+-- Task media bucket with 10GB limit for large video uploads
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types) VALUES
-('task-media', 'task-media', FALSE, 52428800, ARRAY['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm'])
-ON CONFLICT (id) DO NOTHING;
+('task-media', 'task-media', FALSE, 10737418240, ARRAY['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/mpeg'])
+ON CONFLICT (id) DO UPDATE SET file_size_limit = 10737418240;
 
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types) VALUES
 ('policy-media', 'policy-media', TRUE, 104857600, ARRAY['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm'])
@@ -773,6 +1126,8 @@ ON CONFLICT (id) DO NOTHING;
 -- Storage policies
 DROP POLICY IF EXISTS "Users can upload own task media" ON storage.objects;
 CREATE POLICY "Users can upload own task media" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'task-media' AND (storage.foldername(name))[1] = auth.uid()::text);
+DROP POLICY IF EXISTS "Admins can upload task media" ON storage.objects;
+CREATE POLICY "Admins can upload task media" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'task-media' AND EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin'));
 DROP POLICY IF EXISTS "Users can view own task media" ON storage.objects;
 CREATE POLICY "Users can view own task media" ON storage.objects FOR SELECT USING (bucket_id = 'task-media' AND (storage.foldername(name))[1] = auth.uid()::text);
 DROP POLICY IF EXISTS "Admins can view all task media" ON storage.objects;
@@ -799,7 +1154,7 @@ DROP POLICY IF EXISTS "Admins can delete employee docs" ON storage.objects;
 CREATE POLICY "Admins can delete employee docs" ON storage.objects FOR DELETE USING (bucket_id = 'employee-docs' AND EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin'));
 
 -- =====================================================
--- PART 8: AUTO USER CREATION TRIGGER
+-- PART 10: AUTO USER CREATION TRIGGER
 -- =====================================================
 
 CREATE OR REPLACE FUNCTION handle_new_user()
@@ -821,7 +1176,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users FOR EACH ROW EXECUTE FUNCTION handle_new_user();
 
--- Sync existing users
+-- Sync existing users (safe - uses ON CONFLICT)
 INSERT INTO profiles (id, email, full_name, role, status)
 SELECT u.id, u.email, COALESCE(u.raw_user_meta_data->>'full_name', split_part(u.email, '@', 1)), COALESCE(u.raw_user_meta_data->>'role', 'employee'), 'active'
 FROM auth.users u WHERE NOT EXISTS (SELECT 1 FROM profiles p WHERE p.id = u.id) ON CONFLICT (id) DO NOTHING;
@@ -831,172 +1186,8 @@ SELECT p.id, COALESCE(p.full_name, split_part(p.email, '@', 1)), TRUE
 FROM profiles p WHERE NOT EXISTS (SELECT 1 FROM employees e WHERE e.id = p.id) ON CONFLICT (id) DO NOTHING;
 
 -- =====================================================
--- PART 9: TIME CARD ENHANCEMENTS (Added January 2026)
+-- MIGRATION COMPLETE
 -- =====================================================
-
--- Add hourly_rate to employees (optional per-employee override)
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'hourly_rate') THEN
-        ALTER TABLE employees ADD COLUMN hourly_rate NUMERIC(10,2);
-    END IF;
-END $$;
-
--- Add location tracking fields to attendance_logs
-DO $$
-BEGIN
-    -- Clock In location fields
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_lat') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_in_lat NUMERIC(10,7);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_lng') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_in_lng NUMERIC(10,7);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_accuracy') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_in_accuracy NUMERIC(10,2);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_location_status') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_in_location_status TEXT DEFAULT 'unknown';
-    END IF;
-
-    -- Clock Out location fields
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_lat') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_out_lat NUMERIC(10,7);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_lng') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_out_lng NUMERIC(10,7);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_accuracy') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_out_accuracy NUMERIC(10,2);
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_location_status') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_out_location_status TEXT DEFAULT 'unknown';
-    END IF;
-
-    -- Break tracking
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'break_minutes') THEN
-        ALTER TABLE attendance_logs ADD COLUMN break_minutes INTEGER DEFAULT 0;
-    END IF;
-
-    -- Work type (regular, overtime, etc.)
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'work_type') THEN
-        ALTER TABLE attendance_logs ADD COLUMN work_type TEXT DEFAULT 'regular';
-    END IF;
-
-    -- Notes field
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'notes') THEN
-        ALTER TABLE attendance_logs ADD COLUMN notes TEXT;
-    END IF;
-END $$;
-
--- =====================================================
--- PART 10: DEVICE ID CLOCK-IN FEATURE (Added January 2026)
--- =====================================================
--- Replaces location-based clock-in with device ID verification
--- Employees can only clock in from registered devices
-
--- Add registered_device_id to employees table
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'registered_device_id') THEN
-        ALTER TABLE employees ADD COLUMN registered_device_id TEXT;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'device_registered_at') THEN
-        ALTER TABLE employees ADD COLUMN device_registered_at TIMESTAMPTZ;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'employees' AND column_name = 'device_name') THEN
-        ALTER TABLE employees ADD COLUMN device_name TEXT;
-    END IF;
-END $$;
-
--- Add device tracking fields to attendance_logs
-DO $$
-BEGIN
-    -- Clock In device fields
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_device_id') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_in_device_id TEXT;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_in_device_name') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_in_device_name TEXT;
-    END IF;
-
-    -- Clock Out device fields
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_device_id') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_out_device_id TEXT;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_device_name') THEN
-        ALTER TABLE attendance_logs ADD COLUMN clock_out_device_name TEXT;
-    END IF;
-END $$;
-
--- Function to register a device for an employee
-CREATE OR REPLACE FUNCTION register_device(p_device_id TEXT, p_device_name TEXT DEFAULT NULL)
-RETURNS BOOLEAN AS $$
-BEGIN
-    UPDATE employees
-    SET registered_device_id = p_device_id,
-        device_registered_at = NOW(),
-        device_name = COALESCE(p_device_name, 'Unknown Device')
-    WHERE id = auth.uid();
-
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'Employee not found';
-    END IF;
-
-    RETURN TRUE;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Function to check if current device matches registered device
-CREATE OR REPLACE FUNCTION check_device(p_device_id TEXT)
-RETURNS TABLE (is_registered BOOLEAN, registered_device_id TEXT, device_name TEXT) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
-        (e.registered_device_id IS NOT NULL AND e.registered_device_id = p_device_id) AS is_registered,
-        e.registered_device_id,
-        e.device_name
-    FROM employees e
-    WHERE e.id = auth.uid();
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- Function to clear registered device (admin only)
-CREATE OR REPLACE FUNCTION admin_clear_device(p_employee_id UUID)
-RETURNS BOOLEAN AS $$
-BEGIN
-    IF NOT is_admin() THEN
-        RAISE EXCEPTION 'Only admins can clear device registration';
-    END IF;
-
-    UPDATE employees
-    SET registered_device_id = NULL,
-        device_registered_at = NULL,
-        device_name = NULL
-    WHERE id = p_employee_id;
-
-    RETURN TRUE;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- =====================================================
--- PART 11: ADDITIONAL FIXES AND POLICIES
--- =====================================================
--- This section ensures all columns exist and policies are correct
--- Safe to re-run multiple times (idempotent)
-
--- Ensure employees can update their own device registration fields
-DROP POLICY IF EXISTS "Employees can update own device" ON employees;
-CREATE POLICY "Employees can update own device" ON employees
-    FOR UPDATE
-    USING (auth.uid() = id)
-    WITH CHECK (auth.uid() = id);
-
--- Grant execute on device functions to authenticated users
-GRANT EXECUTE ON FUNCTION register_device(TEXT, TEXT) TO authenticated;
-GRANT EXECUTE ON FUNCTION check_device(TEXT) TO authenticated;
-GRANT EXECUTE ON FUNCTION admin_clear_device(UUID) TO authenticated;
-
--- =====================================================
--- SCHEMA COMPLETE
+-- This migration is IDEMPOTENT - safe to run multiple times
+-- NO DATA LOSS - Only adds/modifies structure
 -- =====================================================

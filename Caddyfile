@@ -44,8 +44,8 @@ www.playfunia.com {
 
 # Employee Management Portal - admin.playfunia.com with HTTPS
 admin.playfunia.com {
-    # Reverse proxy to Next.js employee management app
-    reverse_proxy app:3000
+    # Reverse proxy to Next.js employee management app (PM2 on host)
+    reverse_proxy 172.20.0.1:3000
 
     # Enable compression
     encode gzip zstd

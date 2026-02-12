@@ -394,8 +394,6 @@ playfunia_employee_management/
 ├── package.json                  # Project dependencies
 ├── .env.local                    # Environment variables (secrets)
 ├── .env.local.example            # Example environment file
-├── Dockerfile                    # Docker container setup
-├── docker-compose.yml            # Docker orchestration
 └── README.md                     # This file
 ```
 
@@ -589,7 +587,6 @@ For technical readers, here's what powers this application:
 | **Tailwind CSS** | Styling (makes it look good) | 3.4 |
 | **Supabase** | Database, authentication, storage | Latest |
 | **SWR** | Data fetching and caching | 2 |
-| **Docker** | Container deployment (optional) | - |
 
 ---
 

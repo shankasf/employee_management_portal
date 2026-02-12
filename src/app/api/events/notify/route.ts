@@ -4,6 +4,10 @@ import {
   sendEventAssignedEmail,
   sendEventRemovedEmail,
 } from '@/lib/email'
+import {
+  sendEventAssignedSMS,
+  sendEventRemovedSMS,
+} from '@/lib/sms'
 import { formatDate, formatTime } from '@/lib/utils'
 
 type NotificationType = 'event_assigned' | 'event_removed'
@@ -23,6 +27,17 @@ export async function POST(request: NextRequest) {
 
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    // Verify user is admin (only admins can send event notifications)
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+
+    if ((profile as { role: string } | null)?.role !== 'admin') {
+      return NextResponse.json({ error: 'Forbidden - Admin only' }, { status: 403 })
     }
 
     const body: NotifyRequest = await request.json()
@@ -59,6 +74,7 @@ export async function POST(request: NextRequest) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const employee = employeeData as any
     const employeeEmail = employee.profiles?.email
+    const employeePhone = employee.phone_number
 
     if (!employeeEmail) {
       return NextResponse.json({ error: 'Employee email not found' }, { status: 400 })
@@ -81,6 +97,18 @@ export async function POST(request: NextRequest) {
         room: eventData.room || undefined,
         role: role || 'Staff',
       })
+      // Send SMS if phone available
+      if (employeePhone) {
+        sendEventAssignedSMS({
+          employeeName: employee.display_name || 'Employee',
+          employeePhone,
+          eventTitle: eventData.title,
+          eventDate,
+          eventTime,
+          room: eventData.room || undefined,
+          role: role || 'Staff',
+        }).catch(err => console.error('Failed to send event assigned SMS:', err))
+      }
     } else if (type === 'event_removed') {
       result = await sendEventRemovedEmail({
         employeeName: employee.display_name || 'Employee',
@@ -88,6 +116,15 @@ export async function POST(request: NextRequest) {
         eventTitle: eventData.title,
         eventDate,
       })
+      // Send SMS if phone available
+      if (employeePhone) {
+        sendEventRemovedSMS({
+          employeeName: employee.display_name || 'Employee',
+          employeePhone,
+          eventTitle: eventData.title,
+          eventDate,
+        }).catch(err => console.error('Failed to send event removed SMS:', err))
+      }
     } else {
       return NextResponse.json({ error: 'Invalid notification type' }, { status: 400 })
     }
@@ -100,7 +137,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Error sending event notification:', error)
     return NextResponse.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: 'Internal server error'
     }, { status: 500 })
   }
 }

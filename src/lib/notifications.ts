@@ -105,6 +105,7 @@ export async function notifyBulkSchedules(options: {
   days: string[]
   startTime: string
   endTime: string
+  dayTimes?: Record<string, { start_time: string; end_time: string }>
 }): Promise<{ success: boolean; error?: string }> {
   try {
     const response = await fetch('/api/schedules/bulk-notify', {

@@ -1,9 +1,19 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import { useAuth } from '@/contexts/AuthContext'
 import { ReactNode, useState, useEffect } from 'react'
+import { logPageView, logButtonClick } from '@/lib/usage-log'
+import { getSignedStorageUrl } from '@/lib/utils'
+
+// Client-side logging helper
+const log = (message: string, data?: Record<string, unknown>) => {
+    if (typeof window === 'undefined') return;
+    const ts = new Date().toISOString().split('T')[1].slice(0, 12);
+    const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
+    console.log(`%c[${ts}] [AdminLayout] ${message}${dataStr}`, 'color: #FF9800');
+};
 
 const adminNavItems = [
     { name: 'Dashboard', href: '/admin', icon: '📊' },
@@ -12,70 +22,108 @@ const adminNavItems = [
     { name: 'Tasks', href: '/admin/tasks', icon: '✅' },
     { name: 'Events', href: '/admin/events', icon: '🎉' },
     { name: 'Attendance', href: '/admin/attendance', icon: '⏰' },
+    { name: 'Time Card', href: '/admin/timecard', icon: '🕐' },
     { name: 'Reports', href: '/admin/reports', icon: '📈' },
     { name: 'Policies', href: '/admin/policies', icon: '📋' },
+    { name: 'Activity Logs', href: '/admin/activity-logs', icon: '📜' },
 ]
 
 export default function AdminLayout({ children }: { children: ReactNode }) {
     const pathname = usePathname()
-    const router = useRouter()
-    const { profile, signOut, isLoading, user } = useAuth()
+    const { profile, employee, signOut, isLoading, user } = useAuth()
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [signingOut, setSigningOut] = useState(false)
     const [loadingTimeout, setLoadingTimeout] = useState(false)
+    const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null)
+
+    // Load profile picture when employee changes
+    useEffect(() => {
+        let stale = false
+        if (employee?.profile_picture_url) {
+            getSignedStorageUrl(employee.profile_picture_url, 'employee-docs')
+                .then(url => {
+                    if (!stale) setProfilePicUrl(url)
+                })
+                .catch(() => {
+                    if (!stale) setProfilePicUrl(null)
+                })
+        } else {
+            // Fallback to Supabase auth user metadata avatar
+            const metaAvatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture || null
+            setProfilePicUrl(metaAvatar)
+        }
+        return () => { stale = true }
+    }, [employee?.profile_picture_url, user?.user_metadata?.avatar_url, user?.user_metadata?.picture])
+
+    // Log auth state changes
+    useEffect(() => {
+        log('Auth state', {
+            isLoading,
+            hasUser: !!user,
+            userId: user?.id,
+            hasProfile: !!profile,
+            profileEmail: profile?.email,
+            profileRole: profile?.role,
+            hasEmployee: !!employee,
+            displayName: employee?.display_name
+        });
+    }, [isLoading, user, profile, employee]);
+
+    // Log page views when route changes
+    useEffect(() => {
+        const pageName = adminNavItems.find(item => item.href === pathname)?.name || pathname
+        logPageView(`Admin: ${pageName}`, 'navigation')
+    }, [pathname])
 
     // Add timeout to prevent infinite loading
     useEffect(() => {
         const timer = setTimeout(() => {
             if (isLoading) {
+                log('Loading timeout triggered');
                 setLoadingTimeout(true)
             }
         }, 5000) // 5 second timeout
         return () => clearTimeout(timer)
     }, [isLoading])
 
-    // Redirect to login if not authenticated
-    useEffect(() => {
-        if (!isLoading && !user) {
-            router.replace('/login')
-        }
-    }, [isLoading, user, router])
+    // NOTE: Removed client-side redirect - middleware handles auth redirects
+    // Client-side redirect was causing a loop with middleware redirects
 
-    const handleSignOut = () => {
+    const handleSignOut = async () => {
         if (signingOut) return
         setSigningOut(true)
-
-        // Fire-and-forget; we don't wait for network to finish before redirecting
-        signOut().catch((err) => console.error('Error during sign out:', err)).finally(() => {
-            setSigningOut(false)
-        })
-
         setSidebarOpen(false)
-        router.replace('/login')
-        // Hard fallback in case router navigation is blocked
-        setTimeout(() => {
-            if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-                window.location.replace('/login')
-            }
-        }, 150)
+
+        // Log sign out action
+        logButtonClick('Sign Out', 'auth')
+
+        try {
+            // Wait for signOut to complete before redirecting to avoid race condition with middleware
+            await signOut()
+        } catch (err) {
+            console.error('Error during sign out:', err)
+        } finally {
+            setSigningOut(false)
+            // Use hard navigation to ensure middleware sees cleared cookies
+            window.location.href = '/login'
+        }
     }
 
-    if (isLoading && !loadingTimeout) {
+    // Show loading spinner while auth is initializing AND no user yet
+    // Once user is available, render layout even if profile is still loading
+    if (!user) {
+        // If still loading, show spinner
+        if (isLoading && !loadingTimeout) {
+            return (
+                <div className="min-h-screen flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
+                </div>
+            )
+        }
+        // Not loading and no user - middleware will handle redirect, show brief loading
         return (
             <div className="min-h-screen flex items-center justify-center">
                 <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary"></div>
-            </div>
-        )
-    }
-
-    // Don't render layout if not authenticated
-    if (!user) {
-        return (
-            <div className="min-h-screen flex items-center justify-center">
-                <div className="text-center">
-                    <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary mx-auto mb-4"></div>
-                    <p className="text-muted-foreground">Redirecting to login...</p>
-                </div>
             </div>
         )
     }
@@ -132,11 +180,20 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
                     {/* User section */}
                     <div className="border-t p-3 sm:p-4">
                         <div className="flex items-center gap-3 mb-3">
-                            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold text-sm sm:text-base">
-                                {profile?.full_name?.[0] || 'A'}
-                            </div>
+                            {profilePicUrl ? (
+                                <img
+                                    src={profilePicUrl}
+                                    alt="Profile"
+                                    className="w-9 h-9 sm:w-10 sm:h-10 rounded-full object-cover flex-shrink-0"
+                                    onError={() => setProfilePicUrl(null)}
+                                />
+                            ) : (
+                                <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold text-sm sm:text-base flex-shrink-0">
+                                    {(employee?.display_name || profile?.full_name)?.[0] || 'A'}
+                                </div>
+                            )}
                             <div className="flex-1 min-w-0">
-                                <p className="font-medium truncate text-sm sm:text-base">{profile?.full_name || 'Admin'}</p>
+                                <p className="font-medium truncate text-sm sm:text-base">{employee?.display_name || profile?.full_name || 'Admin'}</p>
                                 <p className="text-xs text-muted-foreground truncate">{profile?.email}</p>
                             </div>
                         </div>

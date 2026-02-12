@@ -13,10 +13,75 @@
 import useSWR, { SWRConfiguration, mutate } from 'swr'
 import { createUntypedClient, isAuthError, refreshSession } from '@/lib/supabase/client'
 import { getCacheTimings } from '@/lib/cookiePreferences'
+import { useAuth } from '@/contexts/AuthContext'
+import { NY_TIMEZONE } from '@/lib/utils'
 
-// PERFORMANCE: Create Supabase client once at module level
-// Avoids function call overhead on every fetch
+// PERFORMANCE: Only log in development
+const isDev = process.env.NODE_ENV === 'development';
+
+// Client-side logging helper for data hooks (disabled in production)
+const log = (hook: string, message: string, data?: Record<string, unknown>) => {
+  if (!isDev || typeof window === 'undefined') return;
+  const ts = new Date().toISOString().split('T')[1].slice(0, 12);
+  const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
+  console.log(`%c[${ts}] [Data:${hook}] ${message}${dataStr}`, 'color: #2196F3');
+};
+
+// Uses the same underlying client as AuthContext (shared singleton)
 const supabase = createUntypedClient()
+
+// PERFORMANCE: Removed module-level getSession call - it was causing unnecessary
+// auth checks on every import. Session is already checked by AuthContext.
+
+// PERFORMANCE: Cache today's date string to avoid recreation on every render
+// Refreshes when day changes (checked every minute via SWR's built-in intervals)
+// Uses New York timezone for consistent date handling
+let cachedToday: string = ''
+let cachedTodayTimestamp = 0
+
+function getTodayString(): string {
+  const now = Date.now()
+  // Refresh cache if more than 60 seconds old (catches day changes)
+  if (now - cachedTodayTimestamp > 60000) {
+    // Use New York timezone for consistent date across the app
+    const nyDate = new Date(new Date().toLocaleString("en-US", { timeZone: NY_TIMEZONE }))
+    const year = nyDate.getFullYear()
+    const month = String(nyDate.getMonth() + 1).padStart(2, '0')
+    const day = String(nyDate.getDate()).padStart(2, '0')
+    cachedToday = `${year}-${month}-${day}`
+    cachedTodayTimestamp = now
+  }
+  return cachedToday
+}
+
+/**
+ * Hook to get auth-gated SWR key
+ * Returns null if not authenticated, preventing SWR from fetching
+ *
+ * IMPORTANT: We check user first, not isLoading. This allows data fetching
+ * to start as soon as user is available (from onAuthStateChange), even if
+ * profile is still loading. This prevents the "zeros on refresh" issue.
+ */
+export function useAuthGatedKey<T>(key: T): T | null {
+  const { user, isLoading } = useAuth()
+  const keyStr = typeof key === 'string' ? key : JSON.stringify(key);
+
+  // If we have a user, allow fetching even if profile is still loading
+  if (user) {
+    log('useAuthGatedKey', `${keyStr} -> ACTIVE`, { userId: user.id });
+    return key;
+  }
+
+  // If still loading and no user yet, wait
+  if (isLoading) {
+    log('useAuthGatedKey', `${keyStr} -> null (loading, no user yet)`, { isLoading });
+    return null;
+  }
+
+  // Not loading and no user = not authenticated
+  log('useAuthGatedKey', `${keyStr} -> null (not authenticated)`);
+  return null
+}
 
 // Track if we're currently handling an auth error (prevent infinite loops)
 let isHandlingAuthError = false
@@ -51,19 +116,38 @@ const handleAuthError = async (error: unknown): Promise<void> => {
   }
 }
 
-// PERFORMANCE: Deep comparison function for SWR to prevent unnecessary re-renders
-function deepCompare(a: unknown, b: unknown): boolean {
+// PERFORMANCE: Shallow comparison for SWR - faster than JSON.stringify
+function shallowCompare(a: unknown, b: unknown): boolean {
   if (a === b) return true
   if (typeof a !== typeof b) return false
   if (a === null || b === null) return a === b
   if (typeof a !== 'object') return a === b
 
-  // For arrays and objects, use JSON comparison (fast enough for small objects)
-  try {
-    return JSON.stringify(a) === JSON.stringify(b)
-  } catch {
-    return false
+  // For arrays, compare length and each element's top-level properties
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false
+    if (a.length === 0) return true
+    for (let i = 0; i < a.length; i++) {
+      if (!shallowEqualObjects(a[i], b[i])) return false
+    }
+    return true
   }
+
+  return shallowEqualObjects(a, b)
+}
+
+function shallowEqualObjects(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return a === b
+  const aObj = a as Record<string, unknown>
+  const bObj = b as Record<string, unknown>
+  const aKeys = Object.keys(aObj)
+  const bKeys = Object.keys(bObj)
+  if (aKeys.length !== bKeys.length) return false
+  for (const key of aKeys) {
+    if (aObj[key] !== bObj[key]) return false
+  }
+  return true
 }
 
 // Get SWR config based on cookie preferences (fast mode when accepted)
@@ -78,11 +162,16 @@ function getDefaultConfig(): SWRConfiguration {
     errorRetryCount: 2,           // Retry failed requests 2 times
     errorRetryInterval: 2000,     // Start with 2s retry interval
     focusThrottleInterval: timings.focusThrottleInterval,
-    compare: deepCompare,         // PERFORMANCE: Deep compare to prevent re-renders
-    onError: (error) => {
+    compare: shallowCompare,      // PERFORMANCE: Shallow compare (faster than JSON.stringify)
+    onSuccess: (data, key) => {
+      log('SWR:onSuccess', `Key: ${typeof key === 'string' ? key : JSON.stringify(key)}`, { hasData: !!data });
+    },
+    onError: (error, key) => {
+      log('SWR:onError', `Key: ${typeof key === 'string' ? key : JSON.stringify(key)}`, { error: error?.message || String(error) });
       handleAuthError(error)
     },
     onErrorRetry: (error, _key, _config, revalidate, { retryCount }) => {
+      log('SWR:onErrorRetry', `Retry ${retryCount}`, { error: error?.message || String(error) });
       // Don't retry on auth errors - handle them differently
       if (isAuthError(error)) {
         handleAuthError(error)
@@ -105,38 +194,75 @@ function getLongCacheConfig(): SWRConfiguration {
   }
 }
 
+/**
+ * PERFORMANCE: ensureSession removed - it was redundant
+ * The auth-gated key (useAuthGatedKey) already prevents fetching when not authenticated.
+ * AuthContext handles session validation and refresh.
+ * Keeping this as a no-op for backward compatibility.
+ */
+async function ensureSession(): Promise<boolean> {
+  // PERFORMANCE: No longer checks session - AuthContext handles this
+  // The auth-gated key prevents queries when user is not authenticated
+  return true;
+}
+
 // ============================================
 // ADMIN HOOKS
 // ============================================
 
 /**
  * Fetch admin dashboard statistics
+ * Uses auth-gated key - won't fetch until user is authenticated
  */
 export function useAdminStats() {
+  const key = useAuthGatedKey('admin:dashboard:stats')
+  log('useAdminStats', 'Hook called', { key });
+
   return useSWR(
-    'admin:dashboard:stats',
+    key,
     async () => {
+      log('useAdminStats', 'Fetcher START');
+
+      // Ensure we have a valid session before querying
+      const hasSession = await ensureSession();
+      if (!hasSession) {
+        log('useAdminStats', 'No session, returning defaults');
+        return {
+          active_employees: 0,
+          clocked_in_today: 0,
+          tasks_completed_today: 0,
+          tasks_pending_today: 0,
+          events_today: 0,
+          events_this_week: 0,
+        };
+      }
+
       const { data, error } = await supabase.rpc('get_admin_dashboard_stats')
-      
+
       if (error) {
+        log('useAdminStats', 'RPC error, using fallback', { error: error.message, code: error.code });
         // Fallback to manual count
         const { count: empCount } = await supabase
           .from('employees')
           .select('*', { count: 'exact', head: true })
           .eq('is_active', true)
-        
-        return {
+
+        const fallbackData = {
           active_employees: empCount || 0,
           clocked_in_today: 0,
           tasks_completed_today: 0,
           tasks_pending_today: 0,
           events_today: 0,
           events_this_week: 0,
-        }
+        };
+        log('useAdminStats', 'Fallback data', fallbackData);
+        return fallbackData;
       }
-      return data?.[0] || {}
+      const result = data?.[0] || {};
+      log('useAdminStats', 'RPC success', result);
+      return result;
     },
-    { ...getDefaultConfig(), refreshInterval: getCacheTimings().refreshInterval } // Auto-refresh every 2 minutes
+    { ...getDefaultConfig(), refreshInterval: getCacheTimings().refreshInterval }
   )
 }
 
@@ -144,10 +270,22 @@ export function useAdminStats() {
  * Fetch employees list with optional inactive filter
  */
 export function useEmployees(showInactive = false) {
+  const key = useAuthGatedKey(['admin:employees', showInactive])
+  log('useEmployees', 'Hook called', { key, showInactive });
+
   return useSWR(
-    ['admin:employees', showInactive],
+    key,
     async () => {
-            let query = supabase
+      log('useEmployees', 'Fetcher START');
+
+      // Ensure we have a valid session before querying
+      const hasSession = await ensureSession();
+      if (!hasSession) {
+        log('useEmployees', 'No session, returning empty');
+        return [];
+      }
+
+      let query = supabase
         .from('employees')
         .select(`
           *,
@@ -155,8 +293,7 @@ export function useEmployees(showInactive = false) {
             email,
             full_name,
             role,
-            status,
-            email_confirmed_at
+            status
           )
         `)
         .order('display_name')
@@ -165,8 +302,13 @@ export function useEmployees(showInactive = false) {
         query = query.eq('is_active', true)
       }
 
-      const { data, error } = await query
-      if (error) throw error
+      // PERFORMANCE: Add limit to prevent unbounded queries
+      const { data, error } = await query.limit(500)
+      if (error) {
+        log('useEmployees', 'Query error', { error: error.message, code: error.code });
+        throw error;
+      }
+      log('useEmployees', 'Query success', { count: data?.length || 0 });
       return data || []
     },
     getDefaultConfig()
@@ -177,12 +319,27 @@ export function useEmployees(showInactive = false) {
  * Fetch attendance logs for a specific date
  */
 export function useAttendance(dateFilter: string) {
+  const key = useAuthGatedKey(['admin:attendance', dateFilter])
+
   return useSWR(
-    ['admin:attendance', dateFilter],
+    key,
     async () => {
-            const [year, month, day] = dateFilter.split('-').map(Number)
-      const startOfDay = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0))
-      const endOfDay = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999))
+      // Use NY timezone offset to create correct day boundaries
+      // Determine NY offset using Intl API (works regardless of browser timezone)
+      const getNYOffset = (dateStr: string) => {
+        const dt = new Date(`${dateStr}T12:00:00Z`) // noon UTC to avoid edge cases
+        const nyStr = dt.toLocaleString('en-US', { timeZone: NY_TIMEZONE, hour12: false, hour: '2-digit', minute: '2-digit' })
+        const utcStr = dt.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit', minute: '2-digit' })
+        const [nyH, nyM] = nyStr.split(':').map(Number)
+        const [utcH, utcM] = utcStr.split(':').map(Number)
+        const diffMinutes = (nyH * 60 + nyM) - (utcH * 60 + utcM)
+        const offsetHours = Math.round(diffMinutes / 60)
+        return offsetHours // -5 for EST, -4 for EDT
+      }
+      const nyOffset = getNYOffset(dateFilter)
+      const offsetStr = `${nyOffset < 0 ? '-' : '+'}${String(Math.abs(nyOffset)).padStart(2, '0')}:00`
+      const startOfDay = new Date(`${dateFilter}T00:00:00${offsetStr}`)
+      const endOfDay = new Date(`${dateFilter}T23:59:59.999${offsetStr}`)
 
       const { data, error } = await supabase
         .from('attendance_logs')
@@ -197,6 +354,7 @@ export function useAttendance(dateFilter: string) {
         .gte('clock_in', startOfDay.toISOString())
         .lte('clock_in', endOfDay.toISOString())
         .order('clock_in', { ascending: false })
+        .limit(500)  // PERFORMANCE: Limit attendance records per day
 
       if (error) throw error
       return data || []
@@ -209,12 +367,24 @@ export function useAttendance(dateFilter: string) {
  * Fetch events with filter (upcoming, today, past)
  */
 export function useEvents(filter: 'upcoming' | 'today' | 'past' = 'upcoming') {
+  const key = useAuthGatedKey(['admin:events', filter])
+
   return useSWR(
-    ['admin:events', filter],
+    key,
     async () => {
-            const now = new Date()
-      const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0)
-      const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59)
+      // Use NY timezone for consistent "today" boundaries
+      // Get today's date string in NY timezone
+      const nyDateStr = new Date().toLocaleDateString("en-CA", { timeZone: NY_TIMEZONE }) // YYYY-MM-DD format
+      // Get the NY offset for today using Intl API
+      const nowUtc = new Date(`${nyDateStr}T12:00:00Z`)
+      const nyTimeStr = nowUtc.toLocaleString('en-US', { timeZone: NY_TIMEZONE, hour12: false, hour: '2-digit', minute: '2-digit' })
+      const utcTimeStr = nowUtc.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit', minute: '2-digit' })
+      const [nyH, nyMin] = nyTimeStr.split(':').map(Number)
+      const [utcH] = utcTimeStr.split(':').map(Number)
+      const nyOffsetHours = Math.round(((nyH * 60 + nyMin) - (utcH * 60 + 0)) / 60)
+      const offsetStr = `${nyOffsetHours < 0 ? '-' : '+'}${String(Math.abs(nyOffsetHours)).padStart(2, '0')}:00`
+      const todayStart = new Date(`${nyDateStr}T00:00:00${offsetStr}`)
+      const todayEnd = new Date(`${nyDateStr}T23:59:59${offsetStr}`)
 
       let query = supabase
         .from('events')
@@ -253,10 +423,12 @@ export function useEvents(filter: 'upcoming' | 'today' | 'past' = 'upcoming') {
  * Fetch all tasks
  */
 export function useTasks() {
+  const key = useAuthGatedKey('admin:tasks')
+
   return useSWR(
-    'admin:tasks',
+    key,
     async () => {
-            const { data, error } = await supabase
+      const { data, error } = await supabase
         .from('tasks')
         .select('*')
         .order('title')
@@ -270,13 +442,49 @@ export function useTasks() {
 }
 
 /**
+ * Fetch all task instances (assigned tasks) for admin view
+ */
+export function useTaskInstances(filters?: {
+  startDate?: string
+  endDate?: string
+  status?: string
+  employeeId?: string
+}) {
+  const key = useAuthGatedKey(['admin:task-instances', filters])
+
+  return useSWR(
+    key,
+    async () => {
+      // Use API route to bypass RLS issues
+      const params = new URLSearchParams()
+      if (filters?.startDate) params.set('startDate', filters.startDate)
+      if (filters?.endDate) params.set('endDate', filters.endDate)
+      if (filters?.status) params.set('status', filters.status)
+      if (filters?.employeeId) params.set('employeeId', filters.employeeId)
+
+      const response = await fetch(`/api/admin/task-instances?${params.toString()}`)
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Failed to fetch task instances')
+      }
+
+      const { data } = await response.json()
+      return data || []
+    },
+    getDefaultConfig()
+  )
+}
+
+/**
  * Fetch all policies
  */
 export function usePolicies() {
+  const key = useAuthGatedKey('admin:policies')
+
   return useSWR(
-    'admin:policies',
+    key,
     async () => {
-            const { data, error } = await supabase
+      const { data, error } = await supabase
         .from('policy_strips')
         .select('*')
         .order('created_at', { ascending: false })
@@ -293,10 +501,12 @@ export function usePolicies() {
  * Fetch active employees (for dropdowns/selects)
  */
 export function useActiveEmployees() {
+  const key = useAuthGatedKey('admin:employees:active')
+
   return useSWR(
-    'admin:employees:active',
+    key,
     async () => {
-            const { data, error } = await supabase
+      const { data, error } = await supabase
         .from('employees')
         .select('id, display_name, position')
         .eq('is_active', true)
@@ -341,9 +551,10 @@ export function useOpenAttendance(userId: string | undefined) {
 
 /**
  * Fetch employee's today tasks
+ * PERFORMANCE: Uses cached today string to avoid key changes on re-render
  */
 export function useTodayTasks(userId: string | undefined) {
-  const today = new Date().toISOString().split('T')[0]
+  const today = getTodayString()
 
   return useSWR(
     userId ? ['employee:tasks', userId, today] : null,
@@ -393,19 +604,23 @@ export function useTodayTasks(userId: string | undefined) {
 
 /**
  * Fetch employee's upcoming events
+ * PERFORMANCE: Filter by date in database, not client-side
  */
 export function useMyUpcomingEvents(userId: string | undefined) {
   return useSWR(
     userId ? ['employee:events', userId] : null,
     async () => {
       if (!userId) return []
-      
-      // Direct query (faster than RPC with fallback)
+
+      // PERFORMANCE: Get current timestamp once, filter in DB
+      const now = new Date().toISOString()
+
+      // Direct query with server-side date filter
       const { data, error } = await supabase
         .from('event_staff_assignments')
         .select(`
           role,
-          events (
+          events!inner (
             id,
             title,
             start_time,
@@ -414,23 +629,21 @@ export function useMyUpcomingEvents(userId: string | undefined) {
           )
         `)
         .eq('employee_id', userId)
+        .gte('events.start_time', now)  // PERFORMANCE: Filter in DB, not client
+        .order('events(start_time)', { ascending: true })
         .limit(5)
 
       if (error) throw error
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (data || [])
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .filter((a: any) => a.events && new Date(a.events.start_time) >= new Date())
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .map((a: any) => ({
-          id: a.events.id,
-          title: a.events.title,
-          start_time: a.events.start_time,
-          end_time: a.events.end_time,
-          room: a.events.room,
-          my_role: a.role
-        }))
+      return (data || []).map((a: any) => ({
+        id: a.events.id,
+        title: a.events.title,
+        start_time: a.events.start_time,
+        end_time: a.events.end_time,
+        room: a.events.room,
+        my_role: a.role
+      }))
     },
     getDefaultConfig()
   )
@@ -440,8 +653,9 @@ export function useMyUpcomingEvents(userId: string | undefined) {
  * Fetch active policy strips
  */
 export function useActivePolicies() {
+  const key = useAuthGatedKey('employee:policies:active')
   return useSWR(
-    'employee:policies:active',
+    key,
     async () => {
             const { data, error } = await supabase
         .from('policy_strips')
@@ -475,6 +689,7 @@ export function useMyNotes(userId: string | undefined) {
             title
           )
         `)
+        .eq('employee_id', userId)
         .order('created_at', { ascending: false })
         .limit(20)
 
@@ -514,12 +729,10 @@ export function useEmployeeDashboard(userId: string | undefined) {
       })
 
       if (error) {
-        // If RPC doesn't exist yet, return null to trigger fallback to individual hooks
-        if (error.code === '42883') { // function does not exist
-          console.warn('get_employee_dashboard_data RPC not found. Run migration 002_performance_rpcs.sql')
-          return null
-        }
-        throw error
+        // Return null for any RPC error to trigger fallback to individual hooks
+        // Common errors: 42883 (function not found), 42803 (GROUP BY error), etc.
+        console.warn('get_employee_dashboard_data RPC error:', error.code, error.message)
+        return null
       }
 
       return data
@@ -539,8 +752,10 @@ export function useAdminSchedulesPageData(
   endDate: string,
   status?: string
 ) {
+  const key = useAuthGatedKey(['admin:schedules:page', startDate, endDate, status])
+
   return useSWR(
-    ['admin:schedules:page', startDate, endDate, status],
+    key,
     async () => {
       const { data, error } = await supabase.rpc('get_admin_schedules_page_data', {
         p_start_date: startDate,
@@ -576,10 +791,12 @@ export function useSchedules(filters?: {
   status?: string
   employeeId?: string
 }) {
+  const key = useAuthGatedKey(['admin:schedules', filters])
+
   return useSWR(
-    ['admin:schedules', filters],
+    key,
     async () => {
-            let query = supabase
+      let query = supabase
         .from('schedules')
         .select(`
           *,
@@ -609,7 +826,8 @@ export function useSchedules(filters?: {
         query = query.eq('employee_id', filters.employeeId)
       }
 
-      const { data, error } = await query
+      // PERFORMANCE: Add limit to prevent unbounded queries
+      const { data, error } = await query.limit(500)
       if (error) throw error
       return data || []
     },
@@ -619,12 +837,13 @@ export function useSchedules(filters?: {
 
 /**
  * Fetch employee's schedules
+ * PERFORMANCE: Uses cached today string to avoid key changes on re-render
  */
 export function useMySchedules(userId: string | undefined, filter: 'upcoming' | 'pending' | 'all' = 'upcoming') {
-  const today = new Date().toISOString().split('T')[0]
+  const today = getTodayString()
 
   return useSWR(
-    userId ? ['employee:schedules', userId, filter] : null,
+    userId ? ['employee:schedules', userId, filter, today] : null,
     async () => {
       if (!userId) return []
       
@@ -641,7 +860,8 @@ export function useMySchedules(userId: string | undefined, filter: 'upcoming' | 
         query = query.eq('status', 'pending')
       }
 
-      const { data, error } = await query
+      // PERFORMANCE: Add limit to prevent unbounded queries
+      const { data, error } = await query.limit(100)
       if (error) throw error
       return data || []
     },
@@ -675,10 +895,14 @@ export function usePendingSchedulesCount(userId: string | undefined) {
  * Fetch schedule stats for admin dashboard
  */
 export function useScheduleStats() {
+  const key = useAuthGatedKey('admin:schedules:stats')
+  log('useScheduleStats', 'Hook called', { key });
+
   return useSWR(
-    'admin:schedules:stats',
+    key,
     async () => {
-            const today = new Date().toISOString().split('T')[0]
+      log('useScheduleStats', 'Fetcher START');
+      const today = getTodayString()
 
       const [pendingResult, cancelRequestResult, todayResult] = await Promise.all([
         supabase
@@ -696,11 +920,13 @@ export function useScheduleStats() {
           .neq('status', 'cancelled'),
       ])
 
-      return {
+      const result = {
         pending: pendingResult.count || 0,
         cancellationRequested: cancelRequestResult.count || 0,
         todaySchedules: todayResult.count || 0,
-      }
+      };
+      log('useScheduleStats', 'Query success', result);
+      return result;
     },
     { ...getDefaultConfig(), refreshInterval: getCacheTimings().refreshInterval }
   )

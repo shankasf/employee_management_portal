@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { sendBulkSchedulesCreatedNotification } from '@/lib/email'
-import { formatDate, formatTime } from '@/lib/utils'
+import { sendBulkSchedulesCreatedSMS } from '@/lib/sms'
+import { formatDate, formatTimeString } from '@/lib/utils'
 
 interface BulkNotifyRequest {
   employeeId: string
@@ -12,6 +13,7 @@ interface BulkNotifyRequest {
   days: string[]
   startTime: string
   endTime: string
+  dayTimes?: Record<string, { start_time: string; end_time: string }>
 }
 
 export async function POST(request: NextRequest) {
@@ -36,10 +38,22 @@ export async function POST(request: NextRequest) {
     }
 
     const body: BulkNotifyRequest = await request.json()
-    const { employeeName, scheduleCount, startDate, endDate, days, startTime, endTime } = body
+    const { employeeName, scheduleCount, startDate, endDate, days, startTime, endTime, dayTimes } = body
 
-    if (!employeeName || !scheduleCount || !startDate || !endDate || !days?.length) {
+    if (!employeeName || !scheduleCount || !startDate || !endDate || !days?.length || !startTime || !endTime) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+    }
+
+    // Format per-day times if provided
+    let formattedDayTimes: Record<string, { start_time: string; end_time: string }> | undefined
+    if (dayTimes) {
+      formattedDayTimes = {}
+      for (const [day, times] of Object.entries(dayTimes)) {
+        formattedDayTimes[day] = {
+          start_time: formatTimeString(times.start_time),
+          end_time: formatTimeString(times.end_time),
+        }
+      }
     }
 
     const result = await sendBulkSchedulesCreatedNotification({
@@ -48,9 +62,18 @@ export async function POST(request: NextRequest) {
       startDate: formatDate(startDate),
       endDate: formatDate(endDate),
       days,
-      startTime: formatTime(`2000-01-01T${startTime}`),
-      endTime: formatTime(`2000-01-01T${endTime}`),
+      startTime: formatTimeString(startTime),
+      endTime: formatTimeString(endTime),
+      dayTimes: formattedDayTimes,
     })
+
+    // Send SMS notification to admins (non-blocking)
+    sendBulkSchedulesCreatedSMS({
+      employeeName,
+      scheduleCount,
+      startDate: formatDate(startDate),
+      endDate: formatDate(endDate),
+    }).catch(err => console.error('Failed to send bulk schedule SMS:', err))
 
     return NextResponse.json({
       success: true,
@@ -60,7 +83,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('Error sending bulk schedule notification:', error)
     return NextResponse.json({
-      error: error instanceof Error ? error.message : 'Unknown error'
+      error: 'Internal server error'
     }, { status: 500 })
   }
 }

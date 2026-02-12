@@ -1,5 +1,6 @@
 import { createClient, createUntypedClient } from "@/lib/supabase/client";
 import { Insertable, Updatable, ScheduleStatus, ScheduleEmailType } from "@/types/supabase";
+import { getTodayNY, getDateNY } from "@/lib/utils";
 
 // Get all schedules with employee info (admin view)
 export async function getAllSchedules(filters?: {
@@ -201,7 +202,14 @@ export async function confirmSchedule(scheduleId: string) {
     });
     if (error) throw error;
     return data;
-  } catch {
+  } catch (rpcError: unknown) {
+    // Only fallback if RPC function doesn't exist (PostgreSQL error 42883)
+    const err = rpcError as { code?: string; message?: string };
+    const code = err?.code;
+    const msg = err?.message || '';
+    if (code !== '42883' && !msg.includes('function') && !msg.includes('does not exist')) {
+      throw rpcError;
+    }
     // Fallback to direct update
     const { data, error } = await supabase
       .from("schedules")
@@ -234,7 +242,14 @@ export async function requestScheduleCancellation(
     });
     if (error) throw error;
     return data;
-  } catch {
+  } catch (rpcError: unknown) {
+    // Only fallback if RPC function doesn't exist (PostgreSQL error 42883)
+    const err = rpcError as { code?: string; message?: string };
+    const code = err?.code;
+    const msg = err?.message || '';
+    if (code !== '42883' && !msg.includes('function') && !msg.includes('does not exist')) {
+      throw rpcError;
+    }
     // Fallback to direct update
     const { data, error } = await supabase
       .from("schedules")
@@ -349,7 +364,7 @@ export async function getPendingConfirmations() {
 // Get today's schedules for an employee
 export async function getTodaySchedules(employeeId: string) {
   const supabase = createClient();
-  const today = new Date().toISOString().split("T")[0];
+  const today = getTodayNY();
 
   const { data, error } = await supabase
     .from("schedules")
@@ -366,10 +381,8 @@ export async function getTodaySchedules(employeeId: string) {
 // Get upcoming schedules for an employee (next 7 days)
 export async function getUpcomingSchedules(employeeId: string, days: number = 7) {
   const supabase = createClient();
-  const today = new Date().toISOString().split("T")[0];
-  const endDate = new Date();
-  endDate.setDate(endDate.getDate() + days);
-  const endDateStr = endDate.toISOString().split("T")[0];
+  const today = getTodayNY();
+  const endDateStr = getDateNY(days);
 
   const { data, error } = await supabase
     .from("schedules")
@@ -388,7 +401,7 @@ export async function getUpcomingSchedules(employeeId: string, days: number = 7)
 // Get schedule counts by status (for admin dashboard)
 export async function getScheduleStats() {
   const supabase = createClient();
-  const today = new Date().toISOString().split("T")[0];
+  const today = getTodayNY();
 
   // Run all count queries in PARALLEL for better performance
   const [pendingResult, cancelResult, todayResult] = await Promise.all([

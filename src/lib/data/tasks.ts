@@ -1,5 +1,6 @@
 import { createClient, createUntypedClient } from "@/lib/supabase/client";
 import { Insertable, Updatable } from "@/types/supabase";
+import { getTodayNY } from "@/lib/utils";
 
 // Get all task definitions
 export async function getTasks() {
@@ -178,7 +179,7 @@ export async function deleteTaskInstance(id: string) {
 // Get task completion stats for admin
 export async function getTaskStats(date?: string) {
   const supabase = createUntypedClient();
-  const targetDate = date || new Date().toISOString().split("T")[0];
+  const targetDate = date || getTodayNY();
 
   const { data, error } = await supabase
     .from("task_instances")

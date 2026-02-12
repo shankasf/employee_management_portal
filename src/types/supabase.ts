@@ -41,6 +41,9 @@ export type Database = {
           full_name: string | null;
           role: "admin" | "employee";
           status: "active" | "inactive";
+          reset_token_hash: string | null;
+          reset_token_expires: string | null;
+          email_confirmed_at: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -50,6 +53,9 @@ export type Database = {
           full_name?: string | null;
           role?: "admin" | "employee";
           status?: "active" | "inactive";
+          reset_token_hash?: string | null;
+          reset_token_expires?: string | null;
+          email_confirmed_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -59,6 +65,9 @@ export type Database = {
           full_name?: string | null;
           role?: "admin" | "employee";
           status?: "active" | "inactive";
+          reset_token_hash?: string | null;
+          reset_token_expires?: string | null;
+          email_confirmed_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -89,6 +98,8 @@ export type Database = {
           id_document_number: string | null;
           id_document_expiry: string | null;
           id_document_url: string | null;
+          // Profile picture
+          profile_picture_url: string | null;
           // HR fields
           is_active: boolean;
           emergency_contact_name: string | null;
@@ -122,6 +133,7 @@ export type Database = {
           id_document_number?: string | null;
           id_document_expiry?: string | null;
           id_document_url?: string | null;
+          profile_picture_url?: string | null;
           is_active?: boolean;
           emergency_contact_name?: string | null;
           emergency_contact_phone?: string | null;
@@ -153,6 +165,7 @@ export type Database = {
           id_document_number?: string | null;
           id_document_expiry?: string | null;
           id_document_url?: string | null;
+          profile_picture_url?: string | null;
           is_active?: boolean;
           emergency_contact_name?: string | null;
           emergency_contact_phone?: string | null;
@@ -261,6 +274,8 @@ export type Database = {
           requires_photo: boolean;
           requires_video: boolean;
           requires_notes: boolean;
+          reference_images: string[] | null;
+          reference_videos: string[] | null;
           created_by: string | null;
           created_at: string;
           updated_at: string;
@@ -277,6 +292,8 @@ export type Database = {
           requires_photo?: boolean;
           requires_video?: boolean;
           requires_notes?: boolean;
+          reference_images?: string[] | null;
+          reference_videos?: string[] | null;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -293,6 +310,8 @@ export type Database = {
           requires_photo?: boolean;
           requires_video?: boolean;
           requires_notes?: boolean;
+          reference_images?: string[] | null;
+          reference_videos?: string[] | null;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -308,7 +327,9 @@ export type Database = {
           completed_at: string | null;
           notes: string | null;
           photo_url: string | null;
+          photo_urls: string[] | null;
           video_url: string | null;
+          video_urls: string[] | null;
           created_at: string;
           updated_at: string;
         };
@@ -321,7 +342,9 @@ export type Database = {
           completed_at?: string | null;
           notes?: string | null;
           photo_url?: string | null;
+          photo_urls?: string[] | null;
           video_url?: string | null;
+          video_urls?: string[] | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -334,7 +357,9 @@ export type Database = {
           completed_at?: string | null;
           notes?: string | null;
           photo_url?: string | null;
+          photo_urls?: string[] | null;
           video_url?: string | null;
+          video_urls?: string[] | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -539,8 +564,8 @@ export type Database = {
           cancellation_reason: string | null;
           cancelled_at: string | null;
           cancelled_by: string | null;
-          confirmation_email_sent: boolean;
-          cancellation_email_sent: boolean;
+          confirmation_email_sent: boolean | null;
+          cancellation_email_sent: boolean | null;
           created_at: string;
           updated_at: string;
         };
@@ -560,8 +585,8 @@ export type Database = {
           cancellation_reason?: string | null;
           cancelled_at?: string | null;
           cancelled_by?: string | null;
-          confirmation_email_sent?: boolean;
-          cancellation_email_sent?: boolean;
+          confirmation_email_sent?: boolean | null;
+          cancellation_email_sent?: boolean | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -581,8 +606,8 @@ export type Database = {
           cancellation_reason?: string | null;
           cancelled_at?: string | null;
           cancelled_by?: string | null;
-          confirmation_email_sent?: boolean;
-          cancellation_email_sent?: boolean;
+          confirmation_email_sent?: boolean | null;
+          cancellation_email_sent?: boolean | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -645,6 +670,100 @@ export type Database = {
           created_at?: string;
         };
       };
+      activity_logs: {
+        Row: {
+          id: string;
+          admin_id: string | null;
+          admin_email: string | null;
+          action: string;
+          entity_type: string;
+          entity_id: string | null;
+          entity_name: string | null;
+          details: Json | null;
+          ip_address: string | null;
+          user_agent: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          admin_id?: string | null;
+          admin_email?: string | null;
+          action: string;
+          entity_type: string;
+          entity_id?: string | null;
+          entity_name?: string | null;
+          details?: Json | null;
+          ip_address?: string | null;
+          user_agent?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          admin_id?: string | null;
+          admin_email?: string | null;
+          action?: string;
+          entity_type?: string;
+          entity_id?: string | null;
+          entity_name?: string | null;
+          details?: Json | null;
+          ip_address?: string | null;
+          user_agent?: string | null;
+          created_at?: string;
+        };
+      };
+      usage_logs: {
+        Row: {
+          id: string;
+          user_id: string | null;
+          user_email: string | null;
+          user_role: string | null;
+          event_type: string;
+          event_category: string;
+          event_action: string;
+          event_label: string | null;
+          page_path: string | null;
+          page_title: string | null;
+          metadata: Json | null;
+          session_id: string | null;
+          ip_address: string | null;
+          user_agent: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id?: string | null;
+          user_email?: string | null;
+          user_role?: string | null;
+          event_type: string;
+          event_category: string;
+          event_action: string;
+          event_label?: string | null;
+          page_path?: string | null;
+          page_title?: string | null;
+          metadata?: Json | null;
+          session_id?: string | null;
+          ip_address?: string | null;
+          user_agent?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string | null;
+          user_email?: string | null;
+          user_role?: string | null;
+          event_type?: string;
+          event_category?: string;
+          event_action?: string;
+          event_label?: string | null;
+          page_path?: string | null;
+          page_title?: string | null;
+          metadata?: Json | null;
+          session_id?: string | null;
+          ip_address?: string | null;
+          user_agent?: string | null;
+          created_at?: string;
+        };
+      };
     };
     Views: {
       employee_recent_transactions: {
@@ -685,6 +804,7 @@ export type Database = {
           description: string | null;
           location: string | null;
           status: string;
+          scheduled_date: string;
           cutoff_time: string | null;
           requires_photo: boolean;
           requires_video: boolean;
@@ -699,6 +819,8 @@ export type Database = {
           start_time: string;
           end_time: string;
           room: string | null;
+          expected_headcount: number | null;
+          notes: string | null;
           my_role: string | null;
         }[];
       };
@@ -785,6 +907,22 @@ export type Database = {
         Args: { p_employee_id: string };
         Returns: boolean;
       };
+      get_employee_dashboard_data: {
+        Args: { p_user_id: string };
+        Returns: Json;
+      };
+      get_admin_schedules_page_data: {
+        Args: { p_start_date?: string; p_end_date?: string; p_status?: string };
+        Returns: Json;
+      };
+      get_schedule_stats: {
+        Args: Record<string, never>;
+        Returns: Json;
+      };
+      cleanup_old_task_media: {
+        Args: Record<string, never>;
+        Returns: number;
+      };
     };
     Enums: {
       [_ in never]: never;
@@ -817,6 +955,8 @@ export type PolicyStrip = Tables<"policy_strips">;
 export type Schedule = Tables<"schedules">;
 export type ScheduleEmailLog = Tables<"schedule_email_logs">;
 export type NotificationRecipient = Tables<"notification_recipients">;
+export type ActivityLog = Tables<"activity_logs">;
+export type UsageLog = Tables<"usage_logs">;
 
 // Extended types with relations
 export type EmployeeWithProfile = Employee & {

@@ -5,6 +5,28 @@ import { createClient } from '@/lib/supabase/client'
 import { User, Session } from '@supabase/supabase-js'
 import { Tables } from '@/types/supabase'
 
+// Suppress Supabase warnings on client side
+if (typeof window !== 'undefined') {
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    const msg = String(args[0] || '');
+    if (msg.includes('Using the user object as returned from')) return;
+    if (msg.includes('Node.js 18 and below are deprecated')) return;
+    originalWarn.apply(console, args);
+  };
+}
+
+// PERFORMANCE: Only log in development
+const isDev = process.env.NODE_ENV === 'development';
+
+// Client-side logging helper (disabled in production)
+const log = (area: string, message: string, data?: Record<string, unknown>) => {
+  if (!isDev || typeof window === 'undefined') return;
+  const ts = new Date().toISOString().split('T')[1].slice(0, 12);
+  const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
+  console.log(`%c[${ts}] [Auth:${area}] ${message}${dataStr}`, 'color: #4CAF50');
+};
+
 type Profile = Tables<'profiles'>
 type Employee = Tables<'employees'>
 
@@ -46,9 +68,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     const fetchProfile = useCallback(async (userId: string, force = false) => {
         // Skip if already fetching or already fetched for this user (unless forced)
-        if (isFetchingRef.current) return
-        if (!force && fetchedUserIdRef.current === userId) return
+        if (isFetchingRef.current) {
+            log('fetchProfile', 'Skipped - already fetching');
+            return;
+        }
+        if (!force && fetchedUserIdRef.current === userId) {
+            log('fetchProfile', 'Skipped - already fetched for user', { userId });
+            return;
+        }
 
+        log('fetchProfile', 'Starting', { userId, force });
         isFetchingRef.current = true
 
         try {
@@ -69,27 +98,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             if (profileResult.status === 'fulfilled') {
                 const { data: profileData, error: profileError } = profileResult.value
                 if (profileError) {
-                    console.error('Error fetching profile:', profileError.message)
+                    log('fetchProfile', 'Profile error', { error: profileError.message });
                 } else if (profileData) {
-                    setProfile(profileData as Profile)
+                    const p = profileData as Profile;
+                    log('fetchProfile', 'Profile loaded', { email: p.email, role: p.role });
+                    setProfile(p)
                 }
             } else {
-                console.error('Profile fetch failed:', profileResult.reason)
+                log('fetchProfile', 'Profile fetch failed', { reason: String(profileResult.reason) });
             }
 
             if (employeeResult.status === 'fulfilled') {
                 const { data: employeeData, error: employeeError } = employeeResult.value
                 if (employeeError) {
-                    console.error('Error fetching employee:', employeeError.message)
+                    log('fetchProfile', 'Employee error (may be normal for admins)', { error: employeeError.message });
                 } else if (employeeData) {
-                    setEmployee(employeeData as Employee)
+                    const e = employeeData as Employee;
+                    log('fetchProfile', 'Employee loaded', { name: e.display_name });
+                    setEmployee(e)
                 }
             } else {
-                console.error('Employee fetch failed:', employeeResult.reason)
+                log('fetchProfile', 'Employee fetch failed', { reason: String(employeeResult.reason) });
             }
 
             // Mark as fetched for this user
             fetchedUserIdRef.current = userId
+            log('fetchProfile', 'Complete');
         } catch (err) {
             console.error('Error in fetchProfile:', err)
         } finally {
@@ -105,73 +139,81 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         let mounted = true
+        let initAuthCompleted = false
+        log('useEffect', 'AuthProvider mounted');
 
-        const initAuth = async () => {
-            try {
-                // PERFORMANCE: Only use getSession() which reads from cookie (no network call)
-                // Middleware already validates the session, so we don't need to call getUser() here
-                const { data: { session } } = await supabase.auth.getSession()
-                if (!mounted) return
-
-                setSession(session)
-                setUser(session?.user ?? null)
-
-                if (session?.user) {
-                    await fetchProfile(session.user.id)
-                }
-            } catch (error) {
-                console.error('Error initializing auth:', error)
-            } finally {
-                if (mounted) {
-                    setIsLoading(false)
-                }
-            }
-        }
-
-        initAuth()
-
+        // FIX: Use onAuthStateChange as the PRIMARY source of auth state
+        // This handles page refresh correctly with cookies
+        // IMPORTANT: Supabase docs recommend avoiding async callbacks to prevent deadlocks
+        // Use setTimeout(..., 0) to defer async operations
         const { data: { subscription } } = supabase.auth.onAuthStateChange(
-            async (event, session) => {
+            (event, session) => {
+                log('onAuthStateChange', `Event: ${event}`, { hasSession: !!session, email: session?.user?.email });
                 if (!mounted) return
 
-                // Skip INITIAL_SESSION - already handled by initAuth
+                // Handle INITIAL_SESSION - this is the main event on page refresh
+                // "Emitted right after the Supabase client is constructed and the initial session from storage is loaded"
                 if (event === 'INITIAL_SESSION') {
+                    log('onAuthStateChange', 'INITIAL_SESSION received');
+                    initAuthCompleted = true
+                    if (session?.user) {
+                        setSession(session)
+                        setUser(session.user)
+                        // SUPABASE BEST PRACTICE: Defer async operations with setTimeout to prevent deadlocks
+                        setTimeout(() => {
+                            if (mounted) {
+                                fetchProfile(session.user.id).finally(() => {
+                                    if (mounted) setIsLoading(false)
+                                })
+                            }
+                        }, 0)
+                    } else {
+                        setSession(null)
+                        setUser(null)
+                        setIsLoading(false)
+                    }
                     return
                 }
 
-
                 // Handle token refresh - update session without fetching profile
                 if (event === 'TOKEN_REFRESHED' && session) {
+                    log('onAuthStateChange', 'Token refreshed');
                     setSession(session)
                     setUser(session.user)
                     return
                 }
 
-                // Handle sign out - clear state and redirect
+                // Handle sign out - clear state (redirect handled by signOut caller)
                 if (event === 'SIGNED_OUT') {
+                    log('onAuthStateChange', 'Signed out - clearing state');
                     fetchedUserIdRef.current = null
                     setUser(null)
                     setProfile(null)
                     setEmployee(null)
                     setSession(null)
                     setIsLoading(false)
-                    // Redirect to login if on protected route
-                    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
-                        window.location.href = '/login'
-                    }
+                    // Note: Don't redirect here - let the signOut caller handle redirect
+                    // to avoid race conditions with middleware
                     return
                 }
 
-                // Handle sign in
+                // Handle sign in - defer profile fetch to prevent deadlocks
                 if (event === 'SIGNED_IN' && session?.user) {
+                    log('onAuthStateChange', 'Signed in');
                     setSession(session)
                     setUser(session.user)
-                    await fetchProfile(session.user.id)
-                    setIsLoading(false)
+                    setTimeout(() => {
+                        if (mounted) {
+                            fetchProfile(session.user.id).finally(() => {
+                                if (mounted) setIsLoading(false)
+                            })
+                        }
+                    }, 0)
                     return
                 }
 
                 // For other events, update session state
+                log('onAuthStateChange', 'Other event - updating state');
                 setSession(session)
                 setUser(session?.user ?? null)
 
@@ -184,6 +226,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 setIsLoading(false)
             }
         )
+
+        // Fallback: If onAuthStateChange doesn't fire within 2 seconds, use getSession
+        // This handles edge cases where the auth event might not fire
+        const fallbackTimer = setTimeout(async () => {
+            if (initAuthCompleted || !mounted) return
+
+            log('initAuth', 'Fallback triggered - onAuthStateChange did not fire');
+            try {
+                const { data: { session: localSession } } = await supabase.auth.getSession()
+                log('initAuth', 'getSession result', { hasSession: !!localSession, email: localSession?.user?.email });
+
+                if (!mounted || initAuthCompleted) return
+
+                if (localSession?.user) {
+                    setSession(localSession)
+                    setUser(localSession.user)
+                    await fetchProfile(localSession.user.id)
+                } else {
+                    setSession(null)
+                    setUser(null)
+                }
+            } catch (error) {
+                log('initAuth', 'Error', { error: String(error) });
+            } finally {
+                if (mounted && !initAuthCompleted) {
+                    log('initAuth', 'Fallback complete - setting isLoading=false');
+                    setIsLoading(false)
+                }
+            }
+        }, 2000)
 
         // PERFORMANCE: Periodic session refresh every 15 minutes
         // Uses refreshSession() instead of getUser() to avoid unnecessary server validation
@@ -226,6 +298,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             mounted = false
             subscription.unsubscribe()
             clearInterval(sessionCheckInterval)
+            clearTimeout(fallbackTimer)
         }
     }, [fetchProfile]) // fetchProfile is memoized with useCallback
 
@@ -247,12 +320,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         } catch (err) {
             console.warn('localStorage clear warning:', err)
         }
-        // Clear sb-* cookies set by Supabase auth helpers
+        // Clear sb-* cookies set by Supabase auth helpers and middleware cache cookies
         try {
             document.cookie
                 .split(';')
                 .map((c) => c.split('=')[0]?.trim())
-                .filter((name) => name && (name.startsWith('sb-') || name.toLowerCase().includes('supabase')))
+                .filter((name) => name && (
+                    name.startsWith('sb-') ||
+                    name.toLowerCase().includes('supabase') ||
+                    name === 'user_role' ||
+                    name === 'user_role_id' ||
+                    name === 'session_validated'
+                ))
                 .forEach((name) => {
                     document.cookie = `${name}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT`
                 })

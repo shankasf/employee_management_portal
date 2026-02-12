@@ -91,10 +91,25 @@ export function formatDateWithWeekday(date: string | Date): string {
   return weekdayFormatter.format(d);
 }
 
+// Format a raw time string "HH:MM" or "HH:MM:SS" to 12-hour AM/PM format
+export function formatTimeString(time: string | null | undefined): string {
+  if (!time) return '-';
+  const parts = time.split(':');
+  if (parts.length < 2) return time;
+  let h = parseInt(parts[0], 10);
+  const m = parts[1];
+  if (isNaN(h)) return time;
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  if (h === 0) h = 12;
+  else if (h > 12) h -= 12;
+  return `${h}:${m} ${ampm}`;
+}
+
 // Format hours (decimal to hours:minutes)
 export function formatHours(hours: number): string {
-  const h = Math.floor(hours);
-  const m = Math.round((hours - h) * 60);
+  const totalMinutes = Math.round(hours * 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
   return `${h}h ${m}m`;
 }
 
@@ -107,24 +122,65 @@ export function getCurrentNYTime(): string {
   });
 }
 
-// Get relative time (e.g., "2 hours ago") using cached formatter
+// Get today's date in New York timezone as YYYY-MM-DD string
+export function getTodayNY(): string {
+  const now = new Date();
+  const nyDate = new Date(now.toLocaleString("en-US", { timeZone: NY_TIMEZONE }));
+  const year = nyDate.getFullYear();
+  const month = String(nyDate.getMonth() + 1).padStart(2, '0');
+  const day = String(nyDate.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// Get a date N days from today in New York timezone as YYYY-MM-DD string
+export function getDateNY(daysFromToday: number = 0): string {
+  const now = new Date();
+  const nyDate = new Date(now.toLocaleString("en-US", { timeZone: NY_TIMEZONE }));
+  nyDate.setDate(nyDate.getDate() + daysFromToday);
+  const year = nyDate.getFullYear();
+  const month = String(nyDate.getMonth() + 1).padStart(2, '0');
+  const day = String(nyDate.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+// Parse a YYYY-MM-DD date string as a local date (not UTC)
+export function parseLocalDate(dateStr: string): Date {
+  const [year, month, day] = dateStr.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+
+// Format a YYYY-MM-DD date string for display with weekday
+export function formatScheduleDate(dateStr: string): string {
+  const date = parseLocalDate(dateStr);
+  return date.toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    timeZone: NY_TIMEZONE,
+  });
+}
+
+// Get relative time (e.g., "2 hours ago", "in 2 hours") using cached formatter
 export function getRelativeTime(date: string | Date): string {
   const now = new Date();
   const then = new Date(date);
   const diffInSeconds = Math.floor((now.getTime() - then.getTime()) / 1000);
+  const absDiff = Math.abs(diffInSeconds);
+  const sign = diffInSeconds >= 0 ? -1 : 1; // -1 for past, +1 for future
 
-  if (diffInSeconds < 60) return "just now";
-  if (diffInSeconds < 3600) {
-    const minutes = Math.floor(diffInSeconds / 60);
-    return relativeTimeFormatter.format(-minutes, "minute");
+  if (absDiff < 60) return diffInSeconds >= 0 ? "just now" : "in a moment";
+  if (absDiff < 3600) {
+    const minutes = Math.floor(absDiff / 60);
+    return relativeTimeFormatter.format(sign * minutes, "minute");
   }
-  if (diffInSeconds < 86400) {
-    const hours = Math.floor(diffInSeconds / 3600);
-    return relativeTimeFormatter.format(-hours, "hour");
+  if (absDiff < 86400) {
+    const hours = Math.floor(absDiff / 3600);
+    return relativeTimeFormatter.format(sign * hours, "hour");
   }
-  if (diffInSeconds < 604800) {
-    const days = Math.floor(diffInSeconds / 86400);
-    return relativeTimeFormatter.format(-days, "day");
+  if (absDiff < 604800) {
+    const days = Math.floor(absDiff / 86400);
+    return relativeTimeFormatter.format(sign * days, "day");
   }
   return formatDate(date);
 }
@@ -156,9 +212,11 @@ export function getStatusColor(status: string): string {
   }
 }
 
-// Validate phone number format
+// Validate phone number format (requires at least 10 actual digits)
 export function isValidPhone(phone: string): boolean {
-  const phoneRegex = /^[+]?[\d\s()-]{10,}$/;
+  const digitsOnly = phone.replace(/\D/g, '');
+  if (digitsOnly.length < 10 || digitsOnly.length > 15) return false;
+  const phoneRegex = /^[+]?[\d\s()-]+$/;
   return phoneRegex.test(phone);
 }
 
@@ -202,12 +260,12 @@ export async function getSignedStorageUrl(
     const { data, error } = await supabase.storage
       .from(bucket)
       .createSignedUrl(filePath, 3600);
-    
+
     if (error) {
       console.error('Error creating signed URL:', error);
       return null;
     }
-    
+
     return data?.signedUrl || null;
   } catch (error) {
     console.error('Error getting signed URL:', error);

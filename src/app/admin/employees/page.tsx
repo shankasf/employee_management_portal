@@ -1,9 +1,11 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { useEmployees, invalidateQueries } from '@/lib/hooks/useData'
 import { IdDocumentType } from '@/types/supabase'
+import { logFormSubmit } from '@/lib/usage-log'
+import { getSignedStorageUrl, formatTimeString } from '@/lib/utils'
 
 interface Employee {
     id: string
@@ -25,6 +27,7 @@ interface Employee {
     id_document_number: string | null
     id_document_expiry: string | null
     id_document_url: string | null
+    profile_picture_url: string | null
     emergency_contact_name: string | null
     emergency_contact_phone: string | null
     hr_notes: string | null
@@ -34,7 +37,6 @@ interface Employee {
         full_name: string | null
         role: string
         status: string
-        email_confirmed_at: string | null
     } | null
 }
 
@@ -90,9 +92,95 @@ const defaultEditFormData = {
     is_active: true
 }
 
+// Component to display profile picture with signed URL
+function ProfilePicture({ url, name, size = 'md' }: { url: string | null, name: string, size?: 'sm' | 'md' | 'lg' }) {
+    const [signedUrl, setSignedUrl] = useState<string | null>(null)
+    const [loading, setLoading] = useState(!!url)
+
+    useEffect(() => {
+        if (url) {
+            setLoading(true)
+            getSignedStorageUrl(url, 'employee-docs').then((signed) => {
+                setSignedUrl(signed)
+                setLoading(false)
+            })
+        } else {
+            setSignedUrl(null)
+            setLoading(false)
+        }
+    }, [url])
+
+    const sizeClasses = {
+        sm: 'w-8 h-8 text-sm',
+        md: 'w-10 h-10 text-sm',
+        lg: 'w-16 h-16 text-xl'
+    }
+
+    if (loading) {
+        return (
+            <div className={`${sizeClasses[size]} rounded-full bg-muted animate-pulse flex-shrink-0`} />
+        )
+    }
+
+    if (signedUrl) {
+        return (
+            <img
+                src={signedUrl}
+                alt={name}
+                className={`${sizeClasses[size]} rounded-full object-cover flex-shrink-0`}
+                onError={() => setSignedUrl(null)}
+            />
+        )
+    }
+
+    return (
+        <div className={`${sizeClasses[size]} rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold flex-shrink-0`}>
+            {name?.[0]?.toUpperCase() || 'E'}
+        </div>
+    )
+}
+
+// Component to view ID document with signed URL
+function ViewIdDocument({ url }: { url: string }) {
+    const [signedUrl, setSignedUrl] = useState<string | null>(null)
+    const [loading, setLoading] = useState(true)
+
+    useEffect(() => {
+        getSignedStorageUrl(url, 'employee-docs').then((signed) => {
+            setSignedUrl(signed)
+            setLoading(false)
+        })
+    }, [url])
+
+    if (loading) {
+        return <div className="text-sm text-muted-foreground">Loading document...</div>
+    }
+
+    if (!signedUrl) {
+        return <div className="text-sm text-muted-foreground">Document not available</div>
+    }
+
+    const isPdf = url.toLowerCase().endsWith('.pdf')
+
+    return (
+        <a
+            href={signedUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2 px-3 py-2 text-sm bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors"
+        >
+            <span>{isPdf ? '📄' : '🖼️'}</span>
+            <span>View {isPdf ? 'PDF' : 'Image'}</span>
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+            </svg>
+        </a>
+    )
+}
+
 export default function EmployeesPage() {
-    const [showInactive, setShowInactive] = useState(false)
-    const { data: employees = [], isLoading: loading, mutate } = useEmployees(showInactive)
+    // Always show all employees including inactive ones
+    const { data: employees = [], isLoading: loading, mutate } = useEmployees(true)
     const [showModal, setShowModal] = useState(false)
     const [showEditModal, setShowEditModal] = useState(false)
     const [showViewModal, setShowViewModal] = useState(false)
@@ -109,6 +197,137 @@ export default function EmployeesPage() {
     const [deleteType, setDeleteType] = useState<'deactivate' | 'permanent'>('deactivate')
     const [deleteConfirmed, setDeleteConfirmed] = useState(false)
     const [deleting, setDeleting] = useState(false)
+
+    // Password visibility
+    const [showPassword, setShowPassword] = useState(false)
+
+    // ID Document file upload
+    const [idDocFile, setIdDocFile] = useState<File | null>(null)
+    const [idDocPreview, setIdDocPreview] = useState<string | null>(null)
+    const [editIdDocFile, setEditIdDocFile] = useState<File | null>(null)
+    const [editIdDocPreview, setEditIdDocPreview] = useState<string | null>(null)
+    const [uploadProgress, setUploadProgress] = useState('')
+    const idDocInputRef = useRef<HTMLInputElement>(null)
+    const editIdDocInputRef = useRef<HTMLInputElement>(null)
+
+    // Profile picture file upload
+    const [profilePicFile, setProfilePicFile] = useState<File | null>(null)
+    const [profilePicPreview, setProfilePicPreview] = useState<string | null>(null)
+    const [editProfilePicFile, setEditProfilePicFile] = useState<File | null>(null)
+    const [editProfilePicPreview, setEditProfilePicPreview] = useState<string | null>(null)
+    const [existingProfilePicUrl, setExistingProfilePicUrl] = useState<string | null>(null)
+    const profilePicInputRef = useRef<HTMLInputElement>(null)
+    const editProfilePicInputRef = useRef<HTMLInputElement>(null)
+
+    // Handle ID document file selection
+    function handleIdDocChange(e: React.ChangeEvent<HTMLInputElement>, isEdit = false) {
+        const file = e.target.files?.[0]
+        if (file) {
+            const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']
+            if (!validTypes.includes(file.type)) {
+                alert('Please select an image (JPG, PNG, GIF, WebP) or PDF file')
+                return
+            }
+            if (file.size > 10 * 1024 * 1024) { // 10MB limit
+                alert('File must be less than 10MB')
+                return
+            }
+            if (isEdit) {
+                setEditIdDocFile(file)
+                if (file.type.startsWith('image/')) {
+                    setEditIdDocPreview(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
+                } else {
+                    setEditIdDocPreview(prev => { if (prev) URL.revokeObjectURL(prev); return null })
+                }
+            } else {
+                setIdDocFile(file)
+                if (file.type.startsWith('image/')) {
+                    setIdDocPreview(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
+                } else {
+                    setIdDocPreview(prev => { if (prev) URL.revokeObjectURL(prev); return null })
+                }
+            }
+        }
+    }
+
+    // Upload ID document file to Supabase storage
+    async function uploadIdDoc(file: File, employeeId: string): Promise<string | null> {
+        const supabase = createUntypedClient()
+        const fileExt = file.name.split('.').pop()
+        const fileName = `id_doc_${employeeId}_${Date.now()}.${fileExt}`
+        const filePath = `id-documents/${fileName}`
+
+        setUploadProgress('Uploading ID document...')
+
+        const { error: uploadError } = await supabase.storage
+            .from('employee-docs')
+            .upload(filePath, file, {
+                cacheControl: '3600',
+                upsert: true
+            })
+
+        if (uploadError) {
+            console.error('Error uploading ID document:', uploadError)
+            if (uploadError.message?.includes('Bucket not found')) {
+                console.warn('Storage bucket not configured - skipping upload')
+                return null
+            }
+            throw uploadError
+        }
+
+        return filePath
+    }
+
+    // Handle profile picture file selection
+    function handleProfilePicChange(e: React.ChangeEvent<HTMLInputElement>, isEdit = false) {
+        const file = e.target.files?.[0]
+        if (file) {
+            const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+            if (!validTypes.includes(file.type)) {
+                alert('Please select an image file (JPG, PNG, GIF, WebP)')
+                return
+            }
+            if (file.size > 5 * 1024 * 1024) { // 5MB limit
+                alert('Image must be less than 5MB')
+                return
+            }
+            if (isEdit) {
+                setEditProfilePicFile(file)
+                setEditProfilePicPreview(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
+            } else {
+                setProfilePicFile(file)
+                setProfilePicPreview(prev => { if (prev) URL.revokeObjectURL(prev); return URL.createObjectURL(file) })
+            }
+        }
+    }
+
+    // Upload profile picture to Supabase storage
+    async function uploadProfilePic(file: File, employeeId: string): Promise<string | null> {
+        const supabase = createUntypedClient()
+        const fileExt = file.name.split('.').pop()
+        const fileName = `profile_${employeeId}_${Date.now()}.${fileExt}`
+        const filePath = `profile-pictures/${fileName}`
+
+        setUploadProgress('Uploading profile picture...')
+
+        const { error: uploadError } = await supabase.storage
+            .from('employee-docs')
+            .upload(filePath, file, {
+                cacheControl: '3600',
+                upsert: true
+            })
+
+        if (uploadError) {
+            console.error('Error uploading profile picture:', uploadError)
+            if (uploadError.message?.includes('Bucket not found')) {
+                console.warn('Storage bucket not configured - skipping upload')
+                return null
+            }
+            throw uploadError
+        }
+
+        return filePath
+    }
 
     function openEditModal(emp: Employee) {
         setEditingEmployee(emp)
@@ -136,6 +355,14 @@ export default function EmployeesPage() {
             role: emp.profiles?.role || 'employee',
             is_active: emp.is_active
         })
+        // Load existing profile picture
+        if (emp.profile_picture_url) {
+            getSignedStorageUrl(emp.profile_picture_url, 'employee-docs').then(setExistingProfilePicUrl)
+        } else {
+            setExistingProfilePicUrl(null)
+        }
+        setEditProfilePicFile(null)
+        setEditProfilePicPreview(null)
         setActiveTab('basic')
         setShowEditModal(true)
     }
@@ -217,6 +444,29 @@ export default function EmployeesPage() {
         try {
             const supabase = createUntypedClient()
 
+            // Upload ID document if provided
+            let idDocUrl: string | null = editingEmployee.id_document_url
+            if (editIdDocFile) {
+                try {
+                    const newIdDocUrl = await uploadIdDoc(editIdDocFile, editingEmployee.id)
+                    if (newIdDocUrl) idDocUrl = newIdDocUrl
+                } catch (err) {
+                    console.warn('ID document upload failed:', err)
+                }
+            }
+
+            // Upload profile picture if provided
+            let profilePicUrl: string | null = editingEmployee.profile_picture_url
+            if (editProfilePicFile) {
+                try {
+                    const newProfilePicUrl = await uploadProfilePic(editProfilePicFile, editingEmployee.id)
+                    if (newProfilePicUrl) profilePicUrl = newProfilePicUrl
+                } catch (err) {
+                    console.warn('Profile picture upload failed:', err)
+                }
+            }
+            setUploadProgress('')
+
             // Prepare update operations
             const employeeUpdate = supabase
                 .from('employees')
@@ -238,6 +488,8 @@ export default function EmployeesPage() {
                     id_document_type: editFormData.id_document_type || null,
                     id_document_number: editFormData.id_document_number || null,
                     id_document_expiry: editFormData.id_document_expiry || null,
+                    id_document_url: idDocUrl,
+                    profile_picture_url: profilePicUrl,
                     emergency_contact_name: editFormData.emergency_contact_name || null,
                     emergency_contact_phone: editFormData.emergency_contact_phone || null,
                     hr_notes: editFormData.hr_notes || null,
@@ -262,6 +514,7 @@ export default function EmployeesPage() {
             const errors = results.filter(r => r.error).map(r => r.error)
             if (errors.length > 0) throw errors[0]
 
+            logFormSubmit('Edit Employee', 'employee', true, { employeeId: editingEmployee.id })
             alert('Employee updated successfully!')
             setShowEditModal(false)
             setEditingEmployee(null)
@@ -269,6 +522,7 @@ export default function EmployeesPage() {
             mutate()
         } catch (err: unknown) {
             const error = err as Error
+            logFormSubmit('Edit Employee', 'employee', false, { error: error.message })
             console.error('Error updating employee:', error)
             alert('Error: ' + error.message)
         } finally {
@@ -314,12 +568,51 @@ export default function EmployeesPage() {
             const result = await response.json()
 
             if (!response.ok) {
+                logFormSubmit('Add Employee', 'employee', false, { error: result.error })
                 throw new Error(result.error || 'Failed to create employee')
             }
 
+            // Upload profile picture if provided (after employee is created)
+            if (profilePicFile && result.user?.id) {
+                try {
+                    const profilePicUrl = await uploadProfilePic(profilePicFile, result.user.id)
+                    if (profilePicUrl) {
+                        const supabase = createUntypedClient()
+                        await supabase
+                            .from('employees')
+                            .update({ profile_picture_url: profilePicUrl })
+                            .eq('id', result.user.id)
+                    }
+                } catch (err) {
+                    console.warn('Profile picture upload failed:', err)
+                }
+            }
+
+            // Upload ID document if provided (after employee is created)
+            if (idDocFile && result.user?.id) {
+                try {
+                    const idDocUrl = await uploadIdDoc(idDocFile, result.user.id)
+                    if (idDocUrl) {
+                        const supabase = createUntypedClient()
+                        await supabase
+                            .from('employees')
+                            .update({ id_document_url: idDocUrl })
+                            .eq('id', result.user.id)
+                    }
+                } catch (err) {
+                    console.warn('ID document upload failed:', err)
+                }
+            }
+            setUploadProgress('')
+
+            logFormSubmit('Add Employee', 'employee', true, { email: formData.email })
             alert('Employee added successfully!')
             setShowModal(false)
             setFormData(defaultFormData)
+            setProfilePicFile(null)
+            setProfilePicPreview(null)
+            setIdDocFile(null)
+            setIdDocPreview(null)
             setActiveTab('basic')
             invalidateQueries.employees()
             mutate()
@@ -364,15 +657,6 @@ export default function EmployeesPage() {
                     </p>
                 </div>
                 <div className="flex items-center gap-2 sm:gap-3 w-full sm:w-auto">
-                    <label className="flex items-center gap-2 text-xs sm:text-sm">
-                        <input
-                            type="checkbox"
-                            checked={showInactive}
-                            onChange={(e) => setShowInactive(e.target.checked)}
-                            className="rounded border-gray-300"
-                        />
-                        <span className="whitespace-nowrap">Show inactive</span>
-                    </label>
                     <button className="btn-primary flex-1 sm:flex-none text-xs sm:text-sm" onClick={() => { setShowModal(true); setActiveTab('basic'); }}>
                         + Add Employee
                     </button>
@@ -390,6 +674,53 @@ export default function EmployeesPage() {
 
                                 {activeTab === 'basic' && (
                                     <div className="space-y-4">
+                                        {/* Profile Picture Upload */}
+                                        <div className="flex items-center gap-4">
+                                            <input
+                                                ref={profilePicInputRef}
+                                                type="file"
+                                                accept="image/*"
+                                                onChange={(e) => handleProfilePicChange(e, false)}
+                                                className="hidden"
+                                            />
+                                            <div className="relative">
+                                                {profilePicPreview ? (
+                                                    <img
+                                                        src={profilePicPreview}
+                                                        alt="Profile"
+                                                        className="w-20 h-20 rounded-full object-cover border-2 border-muted"
+                                                    />
+                                                ) : (
+                                                    <div className="w-20 h-20 rounded-full bg-muted flex items-center justify-center text-2xl text-muted-foreground">
+                                                        👤
+                                                    </div>
+                                                )}
+                                                {profilePicFile && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setProfilePicFile(null)
+                                                            setProfilePicPreview(null)
+                                                            if (profilePicInputRef.current) profilePicInputRef.current.value = ''
+                                                        }}
+                                                        className="absolute -top-1 -right-1 bg-destructive text-white rounded-full w-5 h-5 flex items-center justify-center text-xs"
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => profilePicInputRef.current?.click()}
+                                                    className="btn-secondary btn-sm"
+                                                >
+                                                    {profilePicFile ? 'Change Photo' : 'Upload Photo'}
+                                                </button>
+                                                <p className="text-xs text-muted-foreground mt-1">Optional. Max 5MB.</p>
+                                            </div>
+                                        </div>
+
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                             <div>
                                                 <label className="label">Email *</label>
@@ -398,8 +729,27 @@ export default function EmployeesPage() {
                                             </div>
                                             <div>
                                                 <label className="label">Password *</label>
-                                                <input type="password" required minLength={6} className="input" value={formData.password}
-                                                    onChange={(e) => setFormData({ ...formData, password: e.target.value })} />
+                                                <div className="relative">
+                                                    <input type={showPassword ? 'text' : 'password'} required minLength={6} className="input pr-10" value={formData.password}
+                                                        onChange={(e) => setFormData({ ...formData, password: e.target.value })} />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowPassword(!showPassword)}
+                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                                        tabIndex={-1}
+                                                    >
+                                                        {showPassword ? (
+                                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                                                            </svg>
+                                                        ) : (
+                                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                                                            </svg>
+                                                        )}
+                                                    </button>
+                                                </div>
                                             </div>
                                         </div>
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -536,9 +886,50 @@ export default function EmployeesPage() {
                                                     onChange={(e) => setFormData({ ...formData, id_document_expiry: e.target.value })} />
                                             </div>
                                         </div>
-                                        <p className="text-sm text-muted-foreground">
-                                            Document upload can be done after creating the employee.
-                                        </p>
+                                        {/* ID Document Upload */}
+                                        <div>
+                                            <label className="label">Upload ID Document <span className="text-muted-foreground font-normal">(optional)</span></label>
+                                            <input
+                                                ref={idDocInputRef}
+                                                type="file"
+                                                accept="image/*,.pdf"
+                                                onChange={(e) => handleIdDocChange(e, false)}
+                                                className="hidden"
+                                            />
+                                            {idDocFile ? (
+                                                <div className="relative border rounded-lg p-3">
+                                                    {idDocPreview ? (
+                                                        <img src={idDocPreview} alt="ID Document" className="w-full h-32 object-contain rounded" />
+                                                    ) : (
+                                                        <div className="flex items-center gap-3 text-sm">
+                                                            <span className="text-2xl">📄</span>
+                                                            <span className="truncate">{idDocFile.name}</span>
+                                                        </div>
+                                                    )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setIdDocFile(null)
+                                                            setIdDocPreview(null)
+                                                            if (idDocInputRef.current) idDocInputRef.current.value = ''
+                                                        }}
+                                                        className="absolute top-2 right-2 bg-destructive text-white rounded-full w-6 h-6 flex items-center justify-center text-sm"
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                </div>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => idDocInputRef.current?.click()}
+                                                    className="w-full h-24 border-2 border-dashed border-muted-foreground/25 rounded-lg hover:border-primary/50 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground"
+                                                >
+                                                    <span className="text-2xl">📎</span>
+                                                    <span className="text-sm">Click to upload image or PDF</span>
+                                                </button>
+                                            )}
+                                            <p className="text-xs text-muted-foreground mt-1">Accepts images (JPG, PNG) or PDF. Max 10MB.</p>
+                                        </div>
                                     </div>
                                 )}
 
@@ -565,7 +956,13 @@ export default function EmployeesPage() {
                                 )}
 
                                 <div className="flex gap-3 pt-4 border-t">
-                                    <button type="button" className="btn-secondary flex-1" onClick={() => setShowModal(false)}>
+                                    <button type="button" className="btn-secondary flex-1" onClick={() => {
+                                        setShowModal(false)
+                                        setProfilePicFile(null)
+                                        setProfilePicPreview(null)
+                                        setIdDocFile(null)
+                                        setIdDocPreview(null)
+                                    }}>
                                         Cancel
                                     </button>
                                     <button type="submit" className="btn-primary flex-1" disabled={saving}>
@@ -592,6 +989,59 @@ export default function EmployeesPage() {
 
                                 {activeTab === 'basic' && (
                                     <div className="space-y-4">
+                                        {/* Profile Picture Upload */}
+                                        <div className="flex items-center gap-4">
+                                            <input
+                                                ref={editProfilePicInputRef}
+                                                type="file"
+                                                accept="image/*"
+                                                onChange={(e) => handleProfilePicChange(e, true)}
+                                                className="hidden"
+                                            />
+                                            <div className="relative">
+                                                {editProfilePicPreview ? (
+                                                    <img
+                                                        src={editProfilePicPreview}
+                                                        alt="Profile"
+                                                        className="w-20 h-20 rounded-full object-cover border-2 border-primary"
+                                                    />
+                                                ) : existingProfilePicUrl ? (
+                                                    <img
+                                                        src={existingProfilePicUrl}
+                                                        alt="Profile"
+                                                        className="w-20 h-20 rounded-full object-cover border-2 border-muted"
+                                                    />
+                                                ) : (
+                                                    <div className="w-20 h-20 rounded-full bg-primary flex items-center justify-center text-2xl text-primary-foreground font-semibold">
+                                                        {editingEmployee?.display_name?.[0] || editingEmployee?.profiles?.full_name?.[0] || 'E'}
+                                                    </div>
+                                                )}
+                                                {editProfilePicFile && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setEditProfilePicFile(null)
+                                                            setEditProfilePicPreview(null)
+                                                            if (editProfilePicInputRef.current) editProfilePicInputRef.current.value = ''
+                                                        }}
+                                                        className="absolute -top-1 -right-1 bg-destructive text-white rounded-full w-5 h-5 flex items-center justify-center text-xs"
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                )}
+                                            </div>
+                                            <div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => editProfilePicInputRef.current?.click()}
+                                                    className="btn-secondary btn-sm"
+                                                >
+                                                    {editProfilePicFile ? 'Change Photo' : existingProfilePicUrl ? 'Update Photo' : 'Upload Photo'}
+                                                </button>
+                                                <p className="text-xs text-muted-foreground mt-1">Optional. Max 5MB.</p>
+                                            </div>
+                                        </div>
+
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                             <div>
                                                 <label className="label">Display Name</label>
@@ -729,6 +1179,62 @@ export default function EmployeesPage() {
                                                     onChange={(e) => setEditFormData({ ...editFormData, id_document_expiry: e.target.value })} />
                                             </div>
                                         </div>
+                                        {/* ID Document Upload */}
+                                        <div>
+                                            <label className="label">Upload ID Document <span className="text-muted-foreground font-normal">(optional)</span></label>
+                                            <input
+                                                ref={editIdDocInputRef}
+                                                type="file"
+                                                accept="image/*,.pdf"
+                                                onChange={(e) => handleIdDocChange(e, true)}
+                                                className="hidden"
+                                            />
+                                            {(editIdDocFile || editIdDocPreview || editingEmployee?.id_document_url) ? (
+                                                <div className="relative border rounded-lg p-3">
+                                                    {editIdDocFile ? (
+                                                        editIdDocPreview ? (
+                                                            <img src={editIdDocPreview} alt="ID Document" className="w-full h-32 object-contain rounded" />
+                                                        ) : (
+                                                            <div className="flex items-center gap-3 text-sm">
+                                                                <span className="text-2xl">📄</span>
+                                                                <span className="truncate">{editIdDocFile.name}</span>
+                                                                <span className="text-xs text-green-600">(New file selected)</span>
+                                                            </div>
+                                                        )
+                                                    ) : (
+                                                        <div className="flex items-center gap-3 text-sm">
+                                                            <span className="text-2xl">📄</span>
+                                                            <span className="truncate">Current document uploaded</span>
+                                                        </div>
+                                                    )}
+                                                    <div className="absolute top-2 right-2 flex gap-1">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => editIdDocInputRef.current?.click()}
+                                                            className="bg-primary text-white rounded-full w-6 h-6 flex items-center justify-center text-sm"
+                                                            title="Replace document"
+                                                        >
+                                                            🔄
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => editIdDocInputRef.current?.click()}
+                                                    className="w-full h-24 border-2 border-dashed border-muted-foreground/25 rounded-lg hover:border-primary/50 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground"
+                                                >
+                                                    <span className="text-2xl">📎</span>
+                                                    <span className="text-sm">Click to upload image or PDF</span>
+                                                </button>
+                                            )}
+                                            <p className="text-xs text-muted-foreground mt-1">Accepts images (JPG, PNG) or PDF. Max 10MB.</p>
+                                        </div>
+                                        {uploadProgress && (
+                                            <div className="p-3 bg-blue-50 rounded-lg text-sm text-blue-800 text-center">
+                                                ⏳ {uploadProgress}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
@@ -756,7 +1262,16 @@ export default function EmployeesPage() {
 
                                 <div className="flex gap-3 pt-4 border-t">
                                     <button type="button" className="btn-secondary flex-1"
-                                        onClick={() => { setShowEditModal(false); setEditingEmployee(null); }}>
+                                        onClick={() => {
+                                            setShowEditModal(false);
+                                            setEditingEmployee(null);
+                                            setEditIdDocFile(null);
+                                            setEditIdDocPreview(null);
+                                            setEditProfilePicFile(null);
+                                            setEditProfilePicPreview(null);
+                                            setExistingProfilePicUrl(null);
+                                            setUploadProgress('');
+                                        }}>
                                         Cancel
                                     </button>
                                     <button type="submit" className="btn-primary flex-1" disabled={saving}>
@@ -775,9 +1290,16 @@ export default function EmployeesPage() {
                     <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
                         <div className="p-4 sm:p-6">
                             <div className="flex justify-between items-start mb-4">
-                                <div>
-                                    <h2 className="text-lg sm:text-xl font-bold">{viewingEmployee.display_name || viewingEmployee.profiles?.full_name}</h2>
-                                    <p className="text-sm text-muted-foreground">{viewingEmployee.profiles?.email}</p>
+                                <div className="flex items-center gap-4">
+                                    <ProfilePicture
+                                        url={viewingEmployee.profile_picture_url}
+                                        name={viewingEmployee.display_name || viewingEmployee.profiles?.full_name || 'E'}
+                                        size="lg"
+                                    />
+                                    <div>
+                                        <h2 className="text-lg sm:text-xl font-bold">{viewingEmployee.display_name || viewingEmployee.profiles?.full_name}</h2>
+                                        <p className="text-sm text-muted-foreground">{viewingEmployee.profiles?.email}</p>
+                                    </div>
                                 </div>
                                 <button onClick={() => setShowViewModal(false)} className="text-muted-foreground hover:text-foreground">
                                     <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -793,7 +1315,7 @@ export default function EmployeesPage() {
                                         <div><span className="text-muted-foreground">Position:</span> {viewingEmployee.position || '-'}</div>
                                         <div><span className="text-muted-foreground">Shift:</span> {viewingEmployee.shift_type || '-'}</div>
                                         <div><span className="text-muted-foreground">Shift Time:</span> {viewingEmployee.shift_start && viewingEmployee.shift_end
-                                            ? `${viewingEmployee.shift_start} - ${viewingEmployee.shift_end}` : '-'}</div>
+                                            ? `${formatTimeString(viewingEmployee.shift_start)} - ${formatTimeString(viewingEmployee.shift_end)}` : '-'}</div>
                                         <div><span className="text-muted-foreground">Company:</span> {viewingEmployee.company_name || '-'}</div>
                                         <div><span className="text-muted-foreground">Location:</span> {viewingEmployee.work_location || '-'}</div>
                                     </div>
@@ -827,6 +1349,12 @@ export default function EmployeesPage() {
                                         <div><span className="text-muted-foreground">Number:</span> {viewingEmployee.id_document_number || '-'}</div>
                                         <div><span className="text-muted-foreground">Expiry:</span> {viewingEmployee.id_document_expiry || '-'}</div>
                                     </div>
+                                    {viewingEmployee.id_document_url && (
+                                        <div className="mt-3">
+                                            <p className="text-sm text-muted-foreground mb-2">📎 Uploaded Document</p>
+                                            <ViewIdDocument url={viewingEmployee.id_document_url} />
+                                        </div>
+                                    )}
                                 </div>
 
                                 <div>
@@ -979,9 +1507,11 @@ export default function EmployeesPage() {
                         {employees.map((emp: Employee) => (
                             <div key={emp.id} className="card p-4" onClick={() => openViewModal(emp)}>
                                 <div className="flex items-start gap-3">
-                                    <div className="w-10 h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold flex-shrink-0">
-                                        {emp.display_name?.[0] || emp.profiles?.full_name?.[0] || 'E'}
-                                    </div>
+                                    <ProfilePicture
+                                        url={emp.profile_picture_url}
+                                        name={emp.display_name || emp.profiles?.full_name || 'E'}
+                                        size="md"
+                                    />
                                     <div className="flex-1 min-w-0">
                                         <p className="font-medium truncate">{emp.display_name || emp.profiles?.full_name || 'Unknown'}</p>
                                         <p className="text-xs text-muted-foreground truncate">{emp.profiles?.email}</p>
@@ -1037,9 +1567,11 @@ export default function EmployeesPage() {
                                         <tr key={emp.id} className="hover:bg-muted/30 cursor-pointer" onClick={() => openViewModal(emp)}>
                                             <td className="p-3 sm:p-4">
                                                 <div className="flex items-center gap-3">
-                                                    <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold text-sm">
-                                                        {emp.display_name?.[0] || emp.profiles?.full_name?.[0] || 'E'}
-                                                    </div>
+                                                    <ProfilePicture
+                                                        url={emp.profile_picture_url}
+                                                        name={emp.display_name || emp.profiles?.full_name || 'E'}
+                                                        size="md"
+                                                    />
                                                     <div className="min-w-0">
                                                         <p className="font-medium text-sm truncate">{emp.display_name || emp.profiles?.full_name || 'Unknown'}</p>
                                                         <p className="text-xs text-muted-foreground truncate">{emp.profiles?.email}</p>
@@ -1051,7 +1583,7 @@ export default function EmployeesPage() {
                                                 <div>{emp.shift_type || '-'}</div>
                                                 {emp.shift_start && emp.shift_end && (
                                                     <div className="text-xs text-muted-foreground">
-                                                        {emp.shift_start} - {emp.shift_end}
+                                                        {formatTimeString(emp.shift_start)} - {formatTimeString(emp.shift_end)}
                                                     </div>
                                                 )}
                                             </td>

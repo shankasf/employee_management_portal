@@ -3,7 +3,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { formatTime, formatDateTime } from '@/lib/utils'
+import { formatTime, formatDateTime, formatTimeString } from '@/lib/utils'
+import { RichTextDisplay } from '@/components/RichTextEditor'
 import { getDeviceInfo, formatDeviceDisplay } from '@/lib/device'
 import {
     useEmployeeDashboard,
@@ -14,6 +15,7 @@ import {
     invalidateQueries
 } from '@/lib/hooks/useData'
 import useSWR from 'swr'
+import { logPageView, logButtonClick } from '@/lib/usage-log'
 
 interface Task {
     id: string
@@ -47,24 +49,42 @@ interface Policy {
 export default function EmployeeDashboard() {
     const { employee, user, isLoading: authLoading } = useAuth()
     const [clockLoading, setClockLoading] = useState(false)
+    const [loadingTimeout, setLoadingTimeout] = useState(false)
 
     // Device registration state
     const [showDevicePrompt, setShowDevicePrompt] = useState(false)
     const [deviceRegistering, setDeviceRegistering] = useState(false)
     const [currentDeviceInfo, setCurrentDeviceInfo] = useState<{ deviceId: string; deviceName: string } | null>(null)
 
+    // Log page view
+    useEffect(() => {
+        logPageView('Employee Dashboard', 'attendance')
+    }, [])
+
+    // Add timeout to prevent infinite loading state
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            if (authLoading) {
+                setLoadingTimeout(true)
+            }
+        }, 5000) // 5 second timeout
+        return () => clearTimeout(timer)
+    }, [authLoading])
+
     // Try combined dashboard hook first (1 query), fallback to individual hooks if RPC not available
     const { data: dashboard, mutate: mutateDashboard, isLoading: dashboardLoading } = useEmployeeDashboard(user?.id)
 
-    // Use fallback if combined hook explicitly returned null (RPC doesn't exist)
-    // Don't use fallback if still loading or if data exists
+    // PERFORMANCE: Determine if we need fallback BEFORE calling hooks
+    // Only fetch fallback data when RPC explicitly returned null (not during loading)
     const useFallback = !dashboardLoading && dashboard === null
 
-    // Fallback hooks - only fetch if combined hook returns null (RPC missing)
-    const { data: fallbackAttendance, mutate: mutateFallbackAttendance } = useOpenAttendance(useFallback ? user?.id : undefined)
-    const { data: fallbackTasks } = useTodayTasks(useFallback ? user?.id : undefined)
-    const { data: fallbackEvents } = useMyUpcomingEvents(useFallback ? user?.id : undefined)
-    const { data: fallbackPolicies } = useActivePolicies()
+    // PERFORMANCE: Conditionally enable fallback hooks - pass null key to disable SWR fetch
+    // This prevents 4 extra queries when the combined RPC works
+    const fallbackKey = useFallback ? user?.id : undefined
+    const { data: fallbackAttendance, mutate: mutateFallbackAttendance } = useOpenAttendance(fallbackKey)
+    const { data: fallbackTasks } = useTodayTasks(fallbackKey)
+    const { data: fallbackEvents } = useMyUpcomingEvents(fallbackKey)
+    const { data: fallbackPolicies } = useActivePolicies() // Always fetch - used as fallback for dashboard too
 
     // Fetch device info with SWR for caching (fallback)
     const { data: fallbackDeviceData } = useSWR(
@@ -131,7 +151,9 @@ export default function EmployeeDashboard() {
             setShowDevicePrompt(false)
         } catch (err) {
             console.error('Device registration error:', err)
-            alert('Failed to register device. Please try again.')
+            const errorMessage = err instanceof Error ? err.message :
+                (err as { message?: string })?.message || 'Unknown error'
+            alert(`Failed to register device: ${errorMessage}`)
         } finally {
             setDeviceRegistering(false)
         }
@@ -191,6 +213,9 @@ export default function EmployeeDashboard() {
                 })
             if (error) throw error
 
+            // Log clock in action
+            logButtonClick('Clock In', 'attendance', { deviceId: currentDeviceInfo.deviceId })
+
             mutateAttendance()
         } catch (err) {
             console.error('Clock in error:', err)
@@ -248,6 +273,9 @@ export default function EmployeeDashboard() {
                     .eq('id', clockedIn.id)
             }
 
+            // Log clock out action
+            logButtonClick('Clock Out', 'attendance', { deviceId: currentDeviceInfo.deviceId })
+
             mutateAttendance()
         } catch (err) {
             console.error('Clock out error:', err)
@@ -258,8 +286,8 @@ export default function EmployeeDashboard() {
         }
     }
 
-    // Show loading only on initial auth load
-    if (authLoading) {
+    // Show loading only on initial auth load (with timeout to prevent infinite loading)
+    if (authLoading && !loadingTimeout) {
         return (
             <div className="animate-pulse space-y-6">
                 <div className="h-8 bg-muted rounded w-48"></div>
@@ -358,6 +386,7 @@ export default function EmployeeDashboard() {
                         year: 'numeric',
                         month: 'long',
                         day: 'numeric',
+                        timeZone: 'America/New_York',
                     })}
                 </p>
             </div>
@@ -469,7 +498,7 @@ export default function EmployeeDashboard() {
                                         </div>
                                         {task.cutoff_time && task.status !== 'completed' && (
                                             <span className="badge-warning text-xs flex-shrink-0">
-                                                {task.cutoff_time}
+                                                {formatTimeString(task.cutoff_time)}
                                             </span>
                                         )}
                                     </div>
@@ -550,9 +579,10 @@ export default function EmployeeDashboard() {
                                             <p className="font-medium text-blue-900 dark:text-blue-100 text-sm sm:text-base">
                                                 {policy.title}
                                             </p>
-                                            <p className="text-xs sm:text-sm text-blue-800 dark:text-blue-200 mt-1">
-                                                {policy.content}
-                                            </p>
+                                            <RichTextDisplay
+                                                content={policy.content}
+                                                className="text-xs sm:text-sm text-blue-800 dark:text-blue-200 mt-1"
+                                            />
                                             {policy.category && (
                                                 <span className="badge-outline text-xs mt-2 inline-block">
                                                     {policy.category}

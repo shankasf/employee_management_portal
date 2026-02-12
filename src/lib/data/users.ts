@@ -1,5 +1,6 @@
 import { createClient, createUntypedClient } from "@/lib/supabase/client";
 import { Updatable, IdDocumentType } from "@/types/supabase";
+import { getTodayNY } from "@/lib/utils";
 
 // Get all employees with profiles
 export async function getEmployees(includeInactive = false) {
@@ -102,7 +103,15 @@ export async function getActiveEmployeeCount() {
 // Get employees clocked in today
 export async function getClockedInToday() {
   const supabase = createClient();
-  const today = new Date().toISOString().split("T")[0];
+  const today = getTodayNY();
+
+  // Get proper NY offset for today to create accurate UTC boundary
+  const noon = new Date(`${today}T12:00:00Z`)
+  const nyH = parseInt(noon.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit' }))
+  const utcH = parseInt(noon.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit' }))
+  const offset = nyH - utcH
+  const offsetStr = `${offset < 0 ? '-' : '+'}${String(Math.abs(offset)).padStart(2, '0')}:00`
+  const startOfDay = new Date(`${today}T00:00:00${offsetStr}`).toISOString()
 
   const { data, error } = await supabase
     .from("attendance_logs")
@@ -117,7 +126,7 @@ export async function getClockedInToday() {
       )
     `
     )
-    .gte("clock_in", `${today}T00:00:00`)
+    .gte("clock_in", startOfDay)
     .is("clock_out", null);
 
   if (error) throw error;
@@ -191,7 +200,11 @@ export async function createEmployee(
     ...profileData,
   });
 
-  if (profileError) throw profileError;
+  if (profileError) {
+    // Clean up: delete auth user on profile creation failure
+    await supabase.auth.admin.deleteUser(userId);
+    throw profileError;
+  }
 
   // Create employee record with all fields
   const { data: employee, error: employeeError } = await supabase
@@ -203,7 +216,12 @@ export async function createEmployee(
     .select()
     .single();
 
-  if (employeeError) throw employeeError;
+  if (employeeError) {
+    // Clean up: delete profile and auth user on employee creation failure
+    await supabase.from("profiles").delete().eq("id", userId);
+    await supabase.auth.admin.deleteUser(userId);
+    throw employeeError;
+  }
 
   return employee;
 }

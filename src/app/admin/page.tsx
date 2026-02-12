@@ -2,6 +2,18 @@
 
 import Link from 'next/link'
 import { useAdminStats } from '@/lib/hooks/useData'
+import { useEffect } from 'react'
+
+// PERFORMANCE: Only log in development
+const isDev = process.env.NODE_ENV === 'development';
+
+// Client-side logging helper (disabled in production)
+const log = (message: string, data?: Record<string, unknown>) => {
+    if (!isDev || typeof window === 'undefined') return;
+    const ts = new Date().toISOString().split('T')[1].slice(0, 12);
+    const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
+    console.log(`%c[${ts}] [AdminDashboard] ${message}${dataStr}`, 'color: #E91E63');
+};
 
 interface DashboardStats {
     active_employees: number
@@ -23,6 +35,20 @@ const defaultStats: DashboardStats = {
 
 export default function AdminDashboard() {
     const { data: stats = defaultStats, isLoading: loading, error } = useAdminStats()
+
+    // Log when stats data changes
+    useEffect(() => {
+        log('Render state', {
+            loading,
+            hasError: !!error,
+            errorMessage: error ? String(error) : null,
+            stats: stats ? {
+                active_employees: stats.active_employees,
+                clocked_in_today: stats.clocked_in_today,
+                events_today: stats.events_today
+            } : null
+        });
+    }, [loading, error, stats]);
 
     const statCards = [
         {

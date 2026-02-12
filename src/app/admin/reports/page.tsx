@@ -3,19 +3,24 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { formatDate, formatDateTime, getSignedStorageUrl } from '@/lib/utils'
+import { formatDate, formatDateTime, getSignedStorageUrl, getTodayNY, getDateNY } from '@/lib/utils'
 
 // Using 'any' type for Supabase joined data
 type TaskCompletion = any
 
+function escapeHtml(str: string): string {
+    return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+}
+
 export default function ReportsPage() {
     const [selectedReport, setSelectedReport] = useState<string | null>(null)
-    const [startDate, setStartDate] = useState(() => {
-        const d = new Date()
-        d.setDate(d.getDate() - 1)
-        return d.toISOString().split('T')[0]
-    })
-    const [endDate, setEndDate] = useState(() => new Date().toISOString().split('T')[0])
+    const [startDate, setStartDate] = useState(() => getDateNY(-7))
+    const [endDate, setEndDate] = useState(() => getTodayNY())
     const [loading, setLoading] = useState(false)
     const [taskCompletions, setTaskCompletions] = useState<TaskCompletion[]>([])
     const [selectedCompletion, setSelectedCompletion] = useState<TaskCompletion | null>(null)
@@ -24,6 +29,7 @@ export default function ReportsPage() {
     const [attendanceLogs, setAttendanceLogs] = useState<any[]>([])
     const [events, setEvents] = useState<any[]>([])
     const [employeePerformance, setEmployeePerformance] = useState<any[]>([])
+    const [showExportMenu, setShowExportMenu] = useState(false)
 
     const reportTypes = [
         {
@@ -254,6 +260,276 @@ export default function ReportsPage() {
         }
     }
 
+    // Export functions
+    function exportToPDF() {
+        setShowExportMenu(false)
+        const printWindow = window.open('', '_blank')
+        if (!printWindow) {
+            alert('Please allow popups to export PDF')
+            return
+        }
+
+        const reportTitle = reportTypes.find(r => r.id === selectedReport)?.title || 'Report'
+        const dateRange = `${formatDate(startDate)} - ${formatDate(endDate)}`
+
+        let tableContent = ''
+        let summaryContent = ''
+
+        if (selectedReport === 'attendance') {
+            summaryContent = `
+                <div class="summary">
+                    <div class="summary-item"><div class="summary-label">Completed Shifts</div><div class="summary-value">${completedShifts}</div></div>
+                    <div class="summary-item"><div class="summary-label">Currently In</div><div class="summary-value">${currentlyClockedIn}</div></div>
+                    <div class="summary-item"><div class="summary-label">Late Arrivals</div><div class="summary-value">${lateArrivals}</div></div>
+                    <div class="summary-item"><div class="summary-label">Total Hours</div><div class="summary-value">${totalHours.toFixed(1)}h</div></div>
+                </div>
+            `
+            tableContent = `
+                <table>
+                    <thead><tr><th>Employee</th><th>Position</th><th>Clock In</th><th>Clock Out</th><th>Hours</th><th>Status</th></tr></thead>
+                    <tbody>
+                        ${attendanceLogs.map(log => `
+                            <tr>
+                                <td>${escapeHtml(log.employees?.display_name || 'Unknown')}</td>
+                                <td>${escapeHtml(log.employees?.position || '-')}</td>
+                                <td>${formatDateTime(log.clock_in)}</td>
+                                <td>${log.clock_out ? formatDateTime(log.clock_out) : 'In Progress'}</td>
+                                <td>${log.total_hours ? log.total_hours.toFixed(2) + 'h' : '-'}</td>
+                                <td>${log.late_flag ? 'Late' : ''}${log.early_checkout_flag ? ' Early' : ''}${!log.late_flag && !log.early_checkout_flag ? 'OK' : ''}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `
+        } else if (selectedReport === 'tasks') {
+            summaryContent = `
+                <div class="summary">
+                    <div class="summary-item"><div class="summary-label">Completed</div><div class="summary-value">${completedCount}</div></div>
+                    <div class="summary-item"><div class="summary-label">Pending</div><div class="summary-value">${pendingCount}</div></div>
+                    <div class="summary-item"><div class="summary-label">Overdue</div><div class="summary-value">${overdueCount}</div></div>
+                </div>
+            `
+            tableContent = `
+                <table>
+                    <thead><tr><th>Task</th><th>Employee</th><th>Date</th><th>Status</th><th>Location</th></tr></thead>
+                    <tbody>
+                        ${taskCompletions.map(task => `
+                            <tr>
+                                <td>${escapeHtml(task.tasks?.title || 'Unknown')}</td>
+                                <td>${escapeHtml(task.employees?.display_name || 'Unassigned')}</td>
+                                <td>${formatDate(task.scheduled_date)}</td>
+                                <td>${escapeHtml(task.status)}</td>
+                                <td>${escapeHtml(task.tasks?.location || '-')}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `
+        } else if (selectedReport === 'events') {
+            const totalEvents = events.length
+            const fullyCompleted = events.filter((e: any) => {
+                const checklists = e.event_checklists || []
+                return checklists.length > 0 && checklists.every((c: any) => c.status === 'completed')
+            }).length
+            const totalStaff = events.reduce((sum: number, e: any) => sum + (e.event_staff_assignments?.length || 0), 0)
+
+            summaryContent = `
+                <div class="summary">
+                    <div class="summary-item"><div class="summary-label">Total Events</div><div class="summary-value">${totalEvents}</div></div>
+                    <div class="summary-item"><div class="summary-label">Fully Completed</div><div class="summary-value">${fullyCompleted}</div></div>
+                    <div class="summary-item"><div class="summary-label">Staff Assignments</div><div class="summary-value">${totalStaff}</div></div>
+                </div>
+            `
+            tableContent = `
+                <table>
+                    <thead><tr><th>Event</th><th>Date & Time</th><th>Room</th><th>Staff</th><th>Checklist</th></tr></thead>
+                    <tbody>
+                        ${events.map((event: any) => {
+                            const checklists = event.event_checklists || []
+                            const completed = checklists.filter((c: any) => c.status === 'completed').length
+                            return `
+                                <tr>
+                                    <td>${escapeHtml(event.title || 'Untitled')}</td>
+                                    <td>${formatDateTime(event.start_time)}</td>
+                                    <td>${escapeHtml(event.room || '-')}</td>
+                                    <td>${event.event_staff_assignments?.length || 0} staff</td>
+                                    <td>${completed}/${checklists.length}</td>
+                                </tr>
+                            `
+                        }).join('')}
+                    </tbody>
+                </table>
+            `
+        } else if (selectedReport === 'employee') {
+            const totalEmployees = employeePerformance.length
+            const totalTasksCompleted = employeePerformance.reduce((sum: number, emp: any) => sum + parseInt(emp.completedTasks || 0), 0)
+            const totalHoursWorked = employeePerformance.reduce((sum: number, emp: any) => sum + parseFloat(emp.totalHours || 0), 0)
+
+            summaryContent = `
+                <div class="summary">
+                    <div class="summary-item"><div class="summary-label">Total Employees</div><div class="summary-value">${totalEmployees}</div></div>
+                    <div class="summary-item"><div class="summary-label">Tasks Completed</div><div class="summary-value">${totalTasksCompleted}</div></div>
+                    <div class="summary-item"><div class="summary-label">Total Hours</div><div class="summary-value">${totalHoursWorked.toFixed(1)}h</div></div>
+                </div>
+            `
+            tableContent = `
+                <table>
+                    <thead><tr><th>Employee</th><th>Position</th><th>Shifts</th><th>Hours</th><th>Tasks</th><th>Completion Rate</th><th>Late</th></tr></thead>
+                    <tbody>
+                        ${employeePerformance.map((emp: any) => `
+                            <tr>
+                                <td>${escapeHtml(emp.display_name || 'Unknown')}</td>
+                                <td>${escapeHtml(emp.position || '-')}</td>
+                                <td>${emp.completedShifts}/${emp.totalShifts}</td>
+                                <td>${emp.totalHours}h</td>
+                                <td>${emp.completedTasks}/${emp.totalTasks}</td>
+                                <td>${emp.taskCompletionRate}%</td>
+                                <td>${emp.lateArrivals || 0}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `
+        }
+
+        printWindow.document.write(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>${reportTitle} - ${dateRange}</title>
+                <style>
+                    body { font-family: Arial, sans-serif; padding: 20px; }
+                    h1 { color: #4F46E5; margin-bottom: 5px; font-size: 24px; }
+                    .meta { color: #666; margin-bottom: 20px; font-size: 14px; }
+                    .summary { display: flex; gap: 30px; margin-bottom: 20px; padding: 15px; background: #f5f5f5; border-radius: 8px; flex-wrap: wrap; }
+                    .summary-item { text-align: center; min-width: 100px; }
+                    .summary-label { font-size: 12px; color: #666; }
+                    .summary-value { font-size: 24px; font-weight: bold; color: #333; }
+                    table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+                    th, td { border: 1px solid #ddd; padding: 10px; text-align: left; font-size: 12px; }
+                    th { background-color: #4F46E5; color: white; }
+                    tr:nth-child(even) { background-color: #f9f9f9; }
+                    .footer { margin-top: 30px; text-align: center; color: #999; font-size: 12px; }
+                    @media print { body { padding: 0; } }
+                </style>
+            </head>
+            <body>
+                <h1>${reportTitle}</h1>
+                <p class="meta">Date Range: ${dateRange} | Generated: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}</p>
+                ${summaryContent}
+                ${tableContent}
+                <div class="footer">PlayFunia Employee Management System</div>
+                <script>window.onload = function() { window.print(); }</script>
+            </body>
+            </html>
+        `)
+        printWindow.document.close()
+    }
+
+    function exportToCSV() {
+        setShowExportMenu(false)
+        let headers: string[] = []
+        let rows: string[][] = []
+        let filename = ''
+
+        if (selectedReport === 'attendance') {
+            filename = `attendance_report_${startDate}_to_${endDate}.csv`
+            headers = ['Employee', 'Position', 'Clock In', 'Clock Out', 'Hours', 'Late', 'Early Out']
+            rows = attendanceLogs.map(log => [
+                log.employees?.display_name || 'Unknown',
+                log.employees?.position || '',
+                formatDateTime(log.clock_in),
+                log.clock_out ? formatDateTime(log.clock_out) : '',
+                log.total_hours ? log.total_hours.toFixed(2) : '',
+                log.late_flag ? 'Yes' : 'No',
+                log.early_checkout_flag ? 'Yes' : 'No'
+            ])
+            rows.push([])
+            rows.push(['Summary'])
+            rows.push(['Completed Shifts', completedShifts.toString()])
+            rows.push(['Currently In', currentlyClockedIn.toString()])
+            rows.push(['Late Arrivals', lateArrivals.toString()])
+            rows.push(['Total Hours', totalHours.toFixed(2)])
+        } else if (selectedReport === 'tasks') {
+            filename = `task_report_${startDate}_to_${endDate}.csv`
+            headers = ['Task', 'Employee', 'Date', 'Status', 'Location', 'Has Notes', 'Has Photo', 'Has Video']
+            rows = taskCompletions.map(task => [
+                task.tasks?.title || 'Unknown',
+                task.employees?.display_name || 'Unassigned',
+                formatDate(task.scheduled_date),
+                task.status,
+                task.tasks?.location || '',
+                task.notes ? 'Yes' : 'No',
+                task.photo_url ? 'Yes' : 'No',
+                task.video_url ? 'Yes' : 'No'
+            ])
+            rows.push([])
+            rows.push(['Summary'])
+            rows.push(['Completed', completedCount.toString()])
+            rows.push(['Pending', pendingCount.toString()])
+            rows.push(['Overdue', overdueCount.toString()])
+        } else if (selectedReport === 'events') {
+            filename = `events_report_${startDate}_to_${endDate}.csv`
+            headers = ['Event', 'Date', 'Start Time', 'End Time', 'Room', 'Staff Count', 'Checklist Completed', 'Checklist Total']
+            rows = events.map((event: any) => {
+                const checklists = event.event_checklists || []
+                const completed = checklists.filter((c: any) => c.status === 'completed').length
+                return [
+                    event.title || 'Untitled',
+                    formatDate(event.start_time),
+                    new Date(event.start_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
+                    event.end_time ? new Date(event.end_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : '',
+                    event.room || '',
+                    (event.event_staff_assignments?.length || 0).toString(),
+                    completed.toString(),
+                    checklists.length.toString()
+                ]
+            })
+            rows.push([])
+            rows.push(['Summary'])
+            rows.push(['Total Events', events.length.toString()])
+        } else if (selectedReport === 'employee') {
+            filename = `employee_performance_${startDate}_to_${endDate}.csv`
+            headers = ['Employee', 'Position', 'Completed Shifts', 'Total Shifts', 'Total Hours', 'Completed Tasks', 'Total Tasks', 'Completion Rate', 'Late Arrivals']
+            rows = employeePerformance.map((emp: any) => [
+                emp.display_name || 'Unknown',
+                emp.position || '',
+                emp.completedShifts.toString(),
+                emp.totalShifts.toString(),
+                emp.totalHours,
+                emp.completedTasks.toString(),
+                emp.totalTasks.toString(),
+                emp.taskCompletionRate + '%',
+                emp.lateArrivals.toString()
+            ])
+        }
+
+        const csvContent = [
+            headers.join(','),
+            ...rows.map(row => row.map(cell => `"${cell.replace(/"/g, '""')}"`).join(','))
+        ].join('\n')
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' })
+        const link = document.createElement('a')
+        const url = URL.createObjectURL(blob)
+        link.setAttribute('href', url)
+        link.setAttribute('download', filename)
+        link.style.visibility = 'hidden'
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+        URL.revokeObjectURL(url)
+    }
+
+    // Check if current report has data
+    function hasReportData() {
+        if (selectedReport === 'attendance') return attendanceLogs.length > 0
+        if (selectedReport === 'tasks') return taskCompletions.length > 0
+        if (selectedReport === 'events') return events.length > 0
+        if (selectedReport === 'employee') return employeePerformance.length > 0
+        return false
+    }
+
     // Generate signed URLs when viewing a task completion
     useEffect(() => {
         async function loadSignedUrls() {
@@ -339,7 +615,7 @@ export default function ReportsPage() {
                                     onChange={(e) => setEndDate(e.target.value)}
                                 />
                             </div>
-                            <div className="flex items-end">
+                            <div className="flex items-end gap-2">
                                 <button
                                     className="btn-primary"
                                     onClick={handleGenerateReport}
@@ -347,6 +623,55 @@ export default function ReportsPage() {
                                 >
                                     {loading ? 'Loading...' : 'Generate Report'}
                                 </button>
+
+                                {/* Export Dropdown */}
+                                {hasReportData() && (
+                                    <div className="relative">
+                                        <button
+                                            className="btn-outline inline-flex items-center gap-1"
+                                            onClick={() => setShowExportMenu(!showExportMenu)}
+                                        >
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                            </svg>
+                                            Export
+                                            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                            </svg>
+                                        </button>
+
+                                        {showExportMenu && (
+                                            <>
+                                                <div
+                                                    className="fixed inset-0 z-10"
+                                                    onClick={() => setShowExportMenu(false)}
+                                                />
+                                                <div className="absolute right-0 mt-2 w-48 bg-card border rounded-lg shadow-lg z-20 py-1">
+                                                    <button
+                                                        className="w-full px-4 py-2 text-left text-sm hover:bg-muted flex items-center gap-2"
+                                                        onClick={exportToPDF}
+                                                    >
+                                                        <svg className="w-4 h-4 text-red-500" fill="currentColor" viewBox="0 0 24 24">
+                                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM6 20V4h7v5h5v11H6z"/>
+                                                            <path d="M8 12h8v2H8zm0 4h8v2H8z"/>
+                                                        </svg>
+                                                        Export as PDF
+                                                    </button>
+                                                    <button
+                                                        className="w-full px-4 py-2 text-left text-sm hover:bg-muted flex items-center gap-2"
+                                                        onClick={exportToCSV}
+                                                    >
+                                                        <svg className="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 24 24">
+                                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zM6 20V4h7v5h5v11H6z"/>
+                                                            <path d="M8 12h2v6H8zm4-2h2v8h-2zm-2 4h2v4h-2z"/>
+                                                        </svg>
+                                                        Export as CSV
+                                                    </button>
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                )}
                             </div>
                         </div>
 
