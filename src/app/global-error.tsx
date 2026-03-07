@@ -6,13 +6,13 @@ function isChunkError(error: unknown): boolean {
   if (error instanceof Error) {
     if (error.name === 'ChunkLoadError') return true;
     const msg = error.message.toLowerCase();
-    if (msg.includes('loading chunk') || msg.includes('failed to fetch dynamically imported module')) return true;
+    if (msg.includes('loading chunk') || msg.includes('failed to fetch dynamically imported module') || msg.includes('failed to fetch')) return true;
   }
   return false;
 }
 
 const STORAGE_KEY = 'chunk_error_reload';
-const MAX_RELOADS = 2;
+const MAX_RELOADS = 3;
 const WINDOW_MS = 30_000;
 
 function shouldReload(): boolean {
@@ -54,6 +54,29 @@ export default function GlobalError({
     }
   }, [error, chunk]);
 
+  if (chunk) {
+    return (
+      <html lang="en">
+        <body>
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minHeight: '100vh',
+            fontFamily: 'system-ui, sans-serif',
+            padding: '20px',
+            textAlign: 'center',
+          }}>
+            <div style={{ width: 32, height: 32, border: '3px solid #e5e7eb', borderTopColor: '#2563eb', borderRadius: '50%', animation: 'spin 0.8s linear infinite', marginBottom: 16 }} />
+            <style dangerouslySetInnerHTML={{ __html: '@keyframes spin{to{transform:rotate(360deg)}}' }} />
+            <p style={{ color: '#666' }}>Updating to latest version...</p>
+          </div>
+        </body>
+      </html>
+    );
+  }
+
   return (
     <html lang="en">
       <body>
@@ -71,9 +94,7 @@ export default function GlobalError({
             Something went wrong
           </h2>
           <p style={{ color: '#666', marginBottom: '1.5rem' }}>
-            {chunk
-              ? 'The app has been updated. Please reload to get the latest version.'
-              : 'An unexpected error occurred. Please try again.'}
+            An unexpected error occurred. Please try again.
           </p>
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
             <button
@@ -105,23 +126,21 @@ export default function GlobalError({
               Reload Page
             </button>
           </div>
-          {!chunk && (
-            <button
-              onClick={() => setShowDetails(v => !v)}
-              style={{
-                marginTop: '24px',
-                background: 'none',
-                border: 'none',
-                color: '#9ca3af',
-                cursor: 'pointer',
-                fontSize: '0.75rem',
-                textDecoration: 'underline',
-              }}
-            >
-              {showDetails ? 'Hide details' : 'Show details'}
-            </button>
-          )}
-          {showDetails && !chunk && (
+          <button
+            onClick={() => setShowDetails(v => !v)}
+            style={{
+              marginTop: '24px',
+              background: 'none',
+              border: 'none',
+              color: '#9ca3af',
+              cursor: 'pointer',
+              fontSize: '0.75rem',
+              textDecoration: 'underline',
+            }}
+          >
+            {showDetails ? 'Hide details' : 'Show details'}
+          </button>
+          {showDetails && (
             <pre style={{
               marginTop: '12px',
               padding: '12px',

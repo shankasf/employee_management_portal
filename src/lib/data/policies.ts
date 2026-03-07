@@ -129,7 +129,7 @@ export async function uploadPolicyMedia(
 ): Promise<string> {
   const supabase = createClient();
 
-  const fileExt = file.name.split('.').pop();
+  const fileExt = file.name.split('.').pop() || 'bin';
   const fileName = `${mediaType}-${Date.now()}.${fileExt}`;
 
   const { error: uploadError } = await supabase.storage

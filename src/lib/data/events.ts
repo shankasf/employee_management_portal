@@ -1,5 +1,6 @@
 import { createClient, createUntypedClient } from "@/lib/supabase/client";
 import { Insertable, Updatable } from "@/types/supabase";
+import { getTodayNY, getNYDayBoundary } from "@/lib/utils";
 
 // Get all events
 export async function getEvents(filters?: {
@@ -204,14 +205,9 @@ export async function deleteChecklistItem(checklistId: string) {
 export async function getTodayEvents() {
   const supabase = createClient();
   // Use NY timezone for "today" boundaries
-  const nyDateStr = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }) // YYYY-MM-DD
-  const noon = new Date(`${nyDateStr}T12:00:00Z`)
-  const nyH = parseInt(noon.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit' }))
-  const utcH = parseInt(noon.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit' }))
-  const offset = nyH - utcH
-  const offsetStr = `${offset < 0 ? '-' : '+'}${String(Math.abs(offset)).padStart(2, '0')}:00`
-  const startOfDay = new Date(`${nyDateStr}T00:00:00${offsetStr}`).toISOString();
-  const endOfDay = new Date(`${nyDateStr}T23:59:59.999${offsetStr}`).toISOString();
+  const today = getTodayNY();
+  const startOfDay = getNYDayBoundary(today, 'start');
+  const endOfDay = getNYDayBoundary(today, 'end');
 
   const { data, error } = await supabase
     .from("events")

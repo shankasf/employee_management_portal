@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
+import { formatDate, formatDateOnly, formatTime, formatShortDateWithWeekday, formatShortDate, getTodayNY, getCurrentMonthNY, getNYMonthBoundaries, getNYDayBoundary } from '@/lib/utils'
 import { formatLocationStatus } from '@/lib/geolocation'
 import useSWR from 'swr'
 
@@ -18,13 +19,18 @@ interface TimeCardEntry {
     work_type: string
     clock_in_location_status: string | null
     clock_out_location_status: string | null
+    clock_in_lat: number | null
+    clock_in_lng: number | null
+    clock_out_lat: number | null
+    clock_out_lng: number | null
+    clock_in_location_name: string | null
+    clock_out_location_name: string | null
     notes: string | null
     late_flag: boolean
     early_checkout_flag: boolean
+    actual_clock_out: string | null
+    late_clock_out_minutes: number | null
 }
-
-// Get hourly rate from environment
-const DEFAULT_HOURLY_RATE = parseFloat(process.env.NEXT_PUBLIC_HOURLY_RATE || '15.00')
 
 function escapeHtml(str: string): string {
     return str
@@ -35,20 +41,45 @@ function escapeHtml(str: string): string {
         .replace(/'/g, '&#39;')
 }
 
+// In-memory geocode cache
+const geocodeCache = new Map<string, string>()
+
+async function resolveLocation(lat: number | null, lng: number | null): Promise<string | null> {
+    if (lat == null || lng == null) return null
+    const key = `${lat.toFixed(3)},${lng.toFixed(3)}`
+    if (geocodeCache.has(key)) return geocodeCache.get(key)!
+    try {
+        const res = await fetch(`/api/geocode?lat=${lat}&lng=${lng}`)
+        if (!res.ok) throw new Error('failed')
+        const data = await res.json()
+        const label = data.location || `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        geocodeCache.set(key, label)
+        return label
+    } catch {
+        const fallback = `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        geocodeCache.set(key, fallback)
+        return fallback
+    }
+}
+
+function countUniqueDays(entries: TimeCardEntry[]): number {
+    const days = new Set<string>()
+    for (const entry of entries) {
+        if (entry.clock_out) {
+            days.add(formatDate(entry.clock_in))
+        }
+    }
+    return days.size
+}
+
 export default function EmployeeTimeCardPage() {
     const { user, employee, isLoading: authLoading } = useAuth()
     const [filterType, setFilterType] = useState<'month' | 'range'>('month')
-    const [selectedMonth, setSelectedMonth] = useState(() => {
-        const now = new Date()
-        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-    })
+    const [selectedMonth, setSelectedMonth] = useState(() => getCurrentMonthNY())
     const [dateRange, setDateRange] = useState(() => {
-        const now = new Date()
-        const firstDay = new Date(now.getFullYear(), now.getMonth(), 1)
-        return {
-            start: firstDay.toISOString().slice(0, 10),
-            end: now.toISOString().slice(0, 10),
-        }
+        const today = getTodayNY()
+        const firstDay = today.slice(0, 8) + '01'
+        return { start: firstDay, end: today }
     })
     const [loadingTimeout, setLoadingTimeout] = useState(false)
     const tableRef = useRef<HTMLDivElement>(null)
@@ -63,13 +94,10 @@ export default function EmployeeTimeCardPage() {
         return () => clearTimeout(timer)
     }, [authLoading])
 
-    // Get employee's hourly rate (fallback to env variable)
-    const hourlyRate = employee?.hourly_rate || DEFAULT_HOURLY_RATE
-
-    // Fetch time card data (include hourlyRate in key so it re-fetches when rate loads)
+    // Fetch time card data
     const filterKey = filterType === 'month'
-        ? ['employee:timecard', user?.id, 'month', selectedMonth, hourlyRate]
-        : ['employee:timecard', user?.id, 'range', dateRange.start, dateRange.end, hourlyRate]
+        ? ['employee:timecard', user?.id, 'month', selectedMonth]
+        : ['employee:timecard', user?.id, 'range', dateRange.start, dateRange.end]
 
     const { data: timeCardData, isLoading: timeCardLoading } = useSWR(
         user?.id ? filterKey : null,
@@ -78,12 +106,12 @@ export default function EmployeeTimeCardPage() {
             let endDate: string
 
             if (filterType === 'month') {
-                const [year, month] = selectedMonth.split('-').map(Number)
-                startDate = new Date(year, month - 1, 1).toISOString()
-                endDate = new Date(year, month, 0, 23, 59, 59, 999).toISOString()
+                const boundaries = getNYMonthBoundaries(selectedMonth)
+                startDate = boundaries.start
+                endDate = boundaries.end
             } else {
-                startDate = `${dateRange.start}T00:00:00.000Z`
-                endDate = `${dateRange.end}T23:59:59.999Z`
+                startDate = getNYDayBoundary(dateRange.start, 'start')
+                endDate = getNYDayBoundary(dateRange.end, 'end')
             }
 
             const { data, error } = await supabase
@@ -96,17 +124,30 @@ export default function EmployeeTimeCardPage() {
 
             if (error) throw error
 
-            const entries = (data || []) as TimeCardEntry[]
+            const rawEntries = (data || []) as TimeCardEntry[]
+
+            // Resolve location names inside the fetcher
+            const entries = await Promise.all(rawEntries.map(async (entry) => {
+                const clockInName = entry.clock_in_location_status === 'captured'
+                    ? await resolveLocation(entry.clock_in_lat, entry.clock_in_lng)
+                    : null
+                const clockOutName = entry.clock_out_location_status === 'captured'
+                    ? await resolveLocation(entry.clock_out_lat, entry.clock_out_lng)
+                    : null
+                return {
+                    ...entry,
+                    clock_in_location_name: clockInName,
+                    clock_out_location_name: clockOutName,
+                }
+            }))
 
             // Calculate totals
             let totalHours = 0
-            let totalOT = 0
             let totalBreak = 0
 
             entries.forEach((entry) => {
                 const hours = entry.total_hours || 0
                 totalHours += hours
-                if (hours > 8) totalOT += hours - 8
                 totalBreak += entry.break_minutes || 0
             })
 
@@ -114,10 +155,8 @@ export default function EmployeeTimeCardPage() {
                 entries,
                 totals: {
                     totalHours,
-                    totalOT,
                     totalBreak,
-                    totalEarned: totalHours * hourlyRate,
-                    daysWorked: entries.filter((e) => e.clock_out).length,
+                    daysWorked: countUniqueDays(entries),
                 }
             }
         },
@@ -130,7 +169,7 @@ export default function EmployeeTimeCardPage() {
 
     const timeCardEntries = timeCardData?.entries || []
     const monthlyTotals = timeCardData?.totals || {
-        totalHours: 0, totalOT: 0, totalBreak: 0, totalEarned: 0, daysWorked: 0
+        totalHours: 0, totalBreak: 0, daysWorked: 0
     }
 
     // Format hours to readable format
@@ -142,9 +181,13 @@ export default function EmployeeTimeCardPage() {
         return `${h}h ${m}m`
     }
 
-    // Format currency
-    function formatCurrency(amount: number): string {
-        return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount)
+    // Helper to render a location value
+    function renderLocation(status: string | null, name: string | null) {
+        if (name) {
+            return <span className="text-green-600">{name}</span>
+        }
+        const loc = formatLocationStatus(status)
+        return <span className={loc.color}>{loc.icon ? `${loc.icon} ` : ''}{loc.text}</span>
     }
 
     // Export to CSV
@@ -152,39 +195,31 @@ export default function EmployeeTimeCardPage() {
         const csvCell = (val: string) => `"${val.replace(/"/g, '""')}"`
         const csvRow = (cells: string[]) => cells.map(csvCell).join(',')
 
-        const headers = ['Date', 'Status', 'Type', 'Clock In', 'Clock Out', 'OT', 'Break', 'Hours', 'Hourly Rate', 'Earned', 'Location']
+        const headers = ['Date', 'Status', 'Type', 'Clock In', 'Clock Out', 'Actual Clock Out', 'Late Out (min)', 'Break', 'Hours', 'Clock In Location', 'Clock Out Location']
         const rows = timeCardEntries.map(entry => {
             const hours = entry.total_hours || 0
-            const ot = hours > 8 ? hours - 8 : 0
-            const earned = hours * hourlyRate
-            const clockInDate = new Date(entry.clock_in)
-            const clockOutDate = entry.clock_out ? new Date(entry.clock_out) : null
-            const locationIn = formatLocationStatus(entry.clock_in_location_status)
 
             return csvRow([
-                clockInDate.toLocaleDateString(),
+                formatShortDate(entry.clock_in),
                 entry.clock_out ? 'Complete' : 'In Progress',
                 entry.work_type || 'Regular',
-                clockInDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
-                clockOutDate ? clockOutDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : '-',
-                formatHours(ot),
+                formatTime(entry.clock_in),
+                entry.clock_out ? formatTime(entry.clock_out) : '-',
+                entry.actual_clock_out ? formatTime(entry.actual_clock_out) : '',
+                entry.late_clock_out_minutes ? entry.late_clock_out_minutes.toString() : '',
                 `${entry.break_minutes || 0}m`,
                 formatHours(hours),
-                formatCurrency(hourlyRate),
-                formatCurrency(earned),
-                locationIn.text,
+                entry.clock_in_location_name || formatLocationStatus(entry.clock_in_location_status).text,
+                entry.clock_out_location_name || formatLocationStatus(entry.clock_out_location_status).text,
             ])
         })
 
         rows.push('')
         rows.push(csvRow([
-            'TOTALS', '', '', '', '',
-            formatHours(monthlyTotals.totalOT),
+            'TOTALS', '', '', '', '', '', '',
             `${monthlyTotals.totalBreak}m`,
             formatHours(monthlyTotals.totalHours),
-            '',
-            formatCurrency(monthlyTotals.totalEarned),
-            '',
+            '', '',
         ]))
 
         const csvContent = [csvRow(headers), ...rows].join('\n')
@@ -213,11 +248,9 @@ export default function EmployeeTimeCardPage() {
         let periodLabel: string
         if (filterType === 'month') {
             const [year, month] = selectedMonth.split('-').map(Number)
-            periodLabel = new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+            periodLabel = new Date(year, month - 1, 1).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', year: 'numeric' })
         } else {
-            const startDate = new Date(dateRange.start)
-            const endDate = new Date(dateRange.end)
-            periodLabel = `${startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} - ${endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+            periodLabel = `${formatDateOnly(dateRange.start)} - ${formatDateOnly(dateRange.end)}`
         }
 
         printWindow.document.write(`
@@ -242,7 +275,7 @@ export default function EmployeeTimeCardPage() {
                 <div class="meta">
                     <strong>Employee:</strong> ${escapeHtml(employeeName)}<br>
                     <strong>Period:</strong> ${periodLabel}<br>
-                    <strong>Generated:</strong> ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })} ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
+                    <strong>Generated:</strong> ${new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', year: 'numeric', month: 'short', day: 'numeric' })} ${new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true })}
                 </div>
                 ${printContent.innerHTML}
                 <div class="footer">PlayFunia Employee Management System</div>
@@ -259,8 +292,8 @@ export default function EmployeeTimeCardPage() {
             <div className="space-y-4 sm:space-y-6">
                 <div className="h-12 bg-muted rounded-lg animate-pulse w-48"></div>
                 <div className="h-10 bg-muted rounded-lg animate-pulse w-64"></div>
-                <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-                    {[...Array(5)].map((_, i) => (
+                <div className="grid grid-cols-3 gap-3">
+                    {[...Array(3)].map((_, i) => (
                         <div key={i} className="h-24 bg-muted rounded-xl animate-pulse"></div>
                     ))}
                 </div>
@@ -275,7 +308,7 @@ export default function EmployeeTimeCardPage() {
                 <div>
                     <h1 className="text-2xl sm:text-3xl font-bold">My Time Card</h1>
                     <p className="text-muted-foreground mt-1 text-sm sm:text-base">
-                        View your hours worked and earnings
+                        View your hours worked
                     </p>
                 </div>
             </div>
@@ -373,7 +406,7 @@ export default function EmployeeTimeCardPage() {
             </div>
 
             {/* Summary Cards */}
-            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+            <div className="grid grid-cols-3 gap-3">
                 <div className="card p-4 bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 border-blue-200 dark:border-blue-800">
                     <p className="text-xs font-medium text-blue-600 dark:text-blue-400 uppercase tracking-wide">Days Worked</p>
                     <p className="text-2xl font-bold text-blue-900 dark:text-blue-100 mt-1">{monthlyTotals.daysWorked}</p>
@@ -382,17 +415,9 @@ export default function EmployeeTimeCardPage() {
                     <p className="text-xs font-medium text-green-600 dark:text-green-400 uppercase tracking-wide">Total Hours</p>
                     <p className="text-2xl font-bold text-green-900 dark:text-green-100 mt-1">{formatHours(monthlyTotals.totalHours)}</p>
                 </div>
-                <div className="card p-4 bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-900/20 dark:to-orange-800/20 border-orange-200 dark:border-orange-800">
-                    <p className="text-xs font-medium text-orange-600 dark:text-orange-400 uppercase tracking-wide">Overtime</p>
-                    <p className="text-2xl font-bold text-orange-900 dark:text-orange-100 mt-1">{formatHours(monthlyTotals.totalOT)}</p>
-                </div>
                 <div className="card p-4 bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-800/50 dark:to-gray-700/50 border-gray-200 dark:border-gray-700">
                     <p className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wide">Break Time</p>
                     <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 mt-1">{monthlyTotals.totalBreak}m</p>
-                </div>
-                <div className="card p-4 bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/20 dark:to-purple-800/20 border-purple-200 dark:border-purple-800 col-span-2 lg:col-span-1">
-                    <p className="text-xs font-medium text-purple-600 dark:text-purple-400 uppercase tracking-wide">Total Earned</p>
-                    <p className="text-2xl font-bold text-purple-900 dark:text-purple-100 mt-1">{formatCurrency(monthlyTotals.totalEarned)}</p>
                 </div>
             </div>
 
@@ -422,27 +447,19 @@ export default function EmployeeTimeCardPage() {
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Type</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Clock In</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Clock Out</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">OT</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Break</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Hours</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Rate</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Earned</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Location</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border">
                                 {timeCardEntries.map((entry, index) => {
-                                    const clockInDate = new Date(entry.clock_in)
-                                    const clockOutDate = entry.clock_out ? new Date(entry.clock_out) : null
                                     const hours = entry.total_hours || 0
-                                    const ot = hours > 8 ? hours - 8 : 0
-                                    const earned = hours * hourlyRate
-                                    const locationIn = formatLocationStatus(entry.clock_in_location_status)
 
                                     return (
                                         <tr key={entry.id} className={`${index % 2 === 0 ? 'bg-background' : 'bg-muted/30'} hover:bg-muted/50 transition-colors`}>
                                             <td className="px-4 py-3 text-sm font-medium">
-                                                {clockInDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                                                {formatShortDateWithWeekday(entry.clock_in)}
                                             </td>
                                             <td className="px-4 py-3">
                                                 <span className={`px-2 py-1 rounded-full text-xs font-medium ${
@@ -454,28 +471,33 @@ export default function EmployeeTimeCardPage() {
                                                 </span>
                                             </td>
                                             <td className="px-4 py-3 text-sm capitalize">{entry.work_type || 'Regular'}</td>
-                                            <td className="px-4 py-3 text-sm font-mono">{clockInDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}</td>
-                                            <td className="px-4 py-3 text-sm font-mono">{clockOutDate ? clockOutDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : '-'}</td>
-                                            <td className="px-4 py-3 text-sm">
-                                                {ot > 0 ? (
-                                                    <span className="text-orange-600 dark:text-orange-400 font-medium">{formatHours(ot)}</span>
-                                                ) : '-'}
+                                            <td className="px-4 py-3 text-sm font-mono">{formatTime(entry.clock_in)}</td>
+                                            <td className="px-4 py-3 text-sm font-mono">
+                                                {entry.clock_out ? formatTime(entry.clock_out) : '-'}
+                                                {entry.actual_clock_out && (
+                                                    <div className="text-xs text-muted-foreground font-sans">
+                                                        Actual: {formatTime(entry.actual_clock_out)}
+                                                        {entry.late_clock_out_minutes && (
+                                                            <span className="ml-1 text-amber-600 dark:text-amber-400">
+                                                                (+{entry.late_clock_out_minutes}m)
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </td>
                                             <td className="px-4 py-3 text-sm">{entry.break_minutes || 0}m</td>
                                             <td className="px-4 py-3 text-sm font-semibold">{formatHours(hours)}</td>
-                                            <td className="px-4 py-3 text-sm">{formatCurrency(hourlyRate)}</td>
-                                            <td className="px-4 py-3 text-sm font-semibold text-green-600 dark:text-green-400">{formatCurrency(earned)}</td>
-                                            <td className="px-4 py-3">
-                                                <span className={`text-xs font-medium ${locationIn.color}`}>
-                                                    {locationIn.text === 'GPS' ? (
-                                                        <span className="flex items-center gap-1">
-                                                            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                                                                <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
-                                                            </svg>
-                                                            GPS
-                                                        </span>
-                                                    ) : locationIn.text}
-                                                </span>
+                                            <td className="px-4 py-3 text-sm">
+                                                <div className="flex flex-col gap-0.5">
+                                                    <div>
+                                                        <span className="text-xs font-medium text-muted-foreground">In: </span>
+                                                        {renderLocation(entry.clock_in_location_status, entry.clock_in_location_name)}
+                                                    </div>
+                                                    <div>
+                                                        <span className="text-xs font-medium text-muted-foreground">Out: </span>
+                                                        {renderLocation(entry.clock_out_location_status, entry.clock_out_location_name)}
+                                                    </div>
+                                                </div>
                                             </td>
                                         </tr>
                                     )
@@ -484,22 +506,14 @@ export default function EmployeeTimeCardPage() {
                             <tfoot>
                                 <tr className="bg-primary/10 font-semibold">
                                     <td colSpan={5} className="px-4 py-3 text-sm">TOTALS</td>
-                                    <td className="px-4 py-3 text-sm text-orange-600 dark:text-orange-400">{formatHours(monthlyTotals.totalOT)}</td>
                                     <td className="px-4 py-3 text-sm">{monthlyTotals.totalBreak}m</td>
                                     <td className="px-4 py-3 text-sm font-bold">{formatHours(monthlyTotals.totalHours)}</td>
-                                    <td className="px-4 py-3 text-sm">-</td>
-                                    <td className="px-4 py-3 text-sm font-bold text-green-600 dark:text-green-400">{formatCurrency(monthlyTotals.totalEarned)}</td>
                                     <td className="px-4 py-3 text-sm">-</td>
                                 </tr>
                             </tfoot>
                         </table>
                     )}
                 </div>
-            </div>
-
-            {/* Hourly Rate Info */}
-            <div className="text-sm text-muted-foreground text-center">
-                Current hourly rate: <span className="font-semibold">{formatCurrency(hourlyRate)}</span>/hour
             </div>
         </div>
     )

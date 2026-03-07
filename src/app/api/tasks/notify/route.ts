@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { createClient as createSupabaseAdmin } from '@supabase/supabase-js'
 import { createClient } from '@/lib/supabase/server'
 import {
   sendTaskAssignedEmail,
@@ -8,7 +9,7 @@ import {
   sendTaskAssignedSMS,
   sendTaskCompletedSMS,
 } from '@/lib/sms'
-import { formatDate, formatDateTime, getTodayNY } from '@/lib/utils'
+import { formatDateOnly, formatDateTime, getTodayNY } from '@/lib/utils'
 
 type NotificationType = 'task_assigned' | 'task_completed'
 
@@ -131,7 +132,7 @@ export async function POST(request: NextRequest) {
         employeeEmail,
         taskTitle: task.title,
         taskDescription: task.description || undefined,
-        scheduledDate: formatDate(taskInstanceData.scheduled_date),
+        scheduledDate: formatDateOnly(taskInstanceData.scheduled_date),
         location: task.location || undefined,
       })
 
@@ -141,7 +142,7 @@ export async function POST(request: NextRequest) {
           employeeName: employee.display_name || 'Employee',
           employeePhone,
           taskTitle: task.title,
-          scheduledDate: formatDate(taskInstanceData.scheduled_date),
+          scheduledDate: formatDateOnly(taskInstanceData.scheduled_date),
           location: task.location || undefined,
         }).catch(err => console.error('Failed to send task assigned SMS:', err))
       }
@@ -175,14 +176,8 @@ export async function POST(request: NextRequest) {
       const task = taskInstanceData.tasks
       const employee = taskInstanceData.employees
 
-      // Verify the requesting user owns this task instance
-      const { data: empRecord } = await supabase
-        .from('employees')
-        .select('id')
-        .eq('profile_id', user.id)
-        .single()
-      if (!empRecord || (empRecord as { id: string }).id !== taskInstanceData.employee_id) {
-        // Allow admins to also trigger this
+      // Verify the requesting user owns this task instance or is an admin
+      if (user.id !== taskInstanceData.employee_id) {
         const { data: profile } = await supabase
           .from('profiles')
           .select('role')
@@ -196,7 +191,7 @@ export async function POST(request: NextRequest) {
       result = await sendTaskCompletedEmail({
         employeeName: employee?.display_name || 'Employee',
         taskTitle: task?.title || 'Unknown Task',
-        scheduledDate: formatDate(taskInstanceData.scheduled_date),
+        scheduledDate: formatDateOnly(taskInstanceData.scheduled_date),
         completedAt: formatDateTime(taskInstanceData.completed_at || new Date().toISOString()),
         notes: notes || taskInstanceData.notes || undefined,
       })
@@ -205,9 +200,17 @@ export async function POST(request: NextRequest) {
       sendTaskCompletedSMS({
         employeeName: employee?.display_name || 'Employee',
         taskTitle: task?.title || 'Unknown Task',
-        scheduledDate: formatDate(taskInstanceData.scheduled_date),
+        scheduledDate: formatDateOnly(taskInstanceData.scheduled_date),
         completedAt: formatDateTime(taskInstanceData.completed_at || new Date().toISOString()),
       }).catch(err => console.error('Failed to send task completed SMS:', err))
+
+      // Create next recurring task instance if applicable (non-blocking)
+      createNextRecurringInstance(
+        taskInstanceData.task_id,
+        taskInstanceData.employee_id,
+        taskInstanceData.scheduled_date
+      ).catch(err => console.error('Failed to create next recurring instance:', err))
+
     } else {
       return NextResponse.json({ error: 'Invalid notification type' }, { status: 400 })
     }
@@ -222,5 +225,70 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       error: 'Internal server error'
     }, { status: 500 })
+  }
+}
+
+/**
+ * After a recurring task instance is completed, create the next pending instance.
+ * Uses service role client to bypass RLS.
+ */
+async function createNextRecurringInstance(
+  taskId: string,
+  employeeId: string,
+  lastScheduledDate: string
+) {
+  const supabaseAdmin = createSupabaseAdmin(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+
+  // Check if the task is recurring
+  const { data: task, error: taskError } = await supabaseAdmin
+    .from('tasks')
+    .select('is_recurring, frequency, title')
+    .eq('id', taskId)
+    .single()
+
+  if (taskError || !task || !task.is_recurring) return
+
+  const frequency = task.frequency || 'daily'
+
+  // Calculate next scheduled date
+  const [y, m, d] = lastScheduledDate.split('-').map(Number)
+  const nextDate = new Date(y, m - 1, d, 12, 0, 0)
+
+  switch (frequency) {
+    case 'daily':
+      nextDate.setDate(nextDate.getDate() + 1)
+      break
+    case 'weekly':
+      nextDate.setDate(nextDate.getDate() + 7)
+      break
+    case 'monthly':
+      nextDate.setMonth(nextDate.getMonth() + 1)
+      break
+    default:
+      nextDate.setDate(nextDate.getDate() + 1)
+  }
+
+  const nextDateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}-${String(nextDate.getDate()).padStart(2, '0')}`
+
+  // Create new instance (ignore if duplicate exists via unique constraint)
+  const { error: insertError } = await supabaseAdmin
+    .from('task_instances')
+    .upsert(
+      {
+        task_id: taskId,
+        employee_id: employeeId,
+        scheduled_date: nextDateStr,
+        status: 'pending',
+      },
+      { onConflict: 'task_id,employee_id,scheduled_date', ignoreDuplicates: true }
+    )
+
+  if (insertError) {
+    console.error(`[recurring-task] Failed to create next instance for task ${taskId}:`, insertError.message)
+  } else {
+    console.log(`[recurring-task] Created next ${frequency} instance for "${task.title}" on ${nextDateStr}`)
   }
 }

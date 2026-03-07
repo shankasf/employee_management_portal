@@ -3,7 +3,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { formatDate, formatDateTime, getSignedStorageUrl, getTodayNY, getDateNY } from '@/lib/utils'
+import { formatDate, formatDateOnly, formatDateTime, formatTime, getSignedStorageUrl, getTodayNY, getDateNY, getNYDayBoundary } from '@/lib/utils'
 
 // Using 'any' type for Supabase joined data
 type TaskCompletion = any
@@ -101,11 +101,9 @@ export default function ReportsPage() {
         setLoading(true)
         try {
             const supabase = createUntypedClient()
-            // Parse dates properly using UTC to avoid timezone issues
-            const [startYear, startMonth, startDay] = startDate.split('-').map(Number)
-            const [endYear, endMonth, endDay] = endDate.split('-').map(Number)
-            const startOfDay = new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0))
-            const endOfDay = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999))
+            // Use NY timezone day boundaries for correct date range filtering
+            const startOfDay = new Date(getNYDayBoundary(startDate, 'start'))
+            const endOfDay = new Date(getNYDayBoundary(endDate, 'end'))
 
             const { data, error } = await supabase
                 .from('attendance_logs')
@@ -135,11 +133,9 @@ export default function ReportsPage() {
         setLoading(true)
         try {
             const supabase = createUntypedClient()
-            // Parse dates properly using UTC to avoid timezone issues
-            const [startYear, startMonth, startDay] = startDate.split('-').map(Number)
-            const [endYear, endMonth, endDay] = endDate.split('-').map(Number)
-            const startOfDay = new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0))
-            const endOfDay = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999))
+            // Use NY timezone day boundaries for correct date range filtering
+            const startOfDay = new Date(getNYDayBoundary(startDate, 'start'))
+            const endOfDay = new Date(getNYDayBoundary(endDate, 'end'))
 
             const { data, error } = await supabase
                 .from('events')
@@ -179,11 +175,9 @@ export default function ReportsPage() {
         setLoading(true)
         try {
             const supabase = createUntypedClient()
-            // Parse dates properly using UTC to avoid timezone issues
-            const [startYear, startMonth, startDay] = startDate.split('-').map(Number)
-            const [endYear, endMonth, endDay] = endDate.split('-').map(Number)
-            const startOfDay = new Date(Date.UTC(startYear, startMonth - 1, startDay, 0, 0, 0, 0))
-            const endOfDay = new Date(Date.UTC(endYear, endMonth - 1, endDay, 23, 59, 59, 999))
+            // Use NY timezone day boundaries for correct date range filtering
+            const startOfDay = new Date(getNYDayBoundary(startDate, 'start'))
+            const endOfDay = new Date(getNYDayBoundary(endDate, 'end'))
 
             // Get all employees
             const { data: employees, error: empError } = await supabase
@@ -270,7 +264,7 @@ export default function ReportsPage() {
         }
 
         const reportTitle = reportTypes.find(r => r.id === selectedReport)?.title || 'Report'
-        const dateRange = `${formatDate(startDate)} - ${formatDate(endDate)}`
+        const dateRange = `${formatDateOnly(startDate)} - ${formatDateOnly(endDate)}`
 
         let tableContent = ''
         let summaryContent = ''
@@ -295,7 +289,7 @@ export default function ReportsPage() {
                                 <td>${formatDateTime(log.clock_in)}</td>
                                 <td>${log.clock_out ? formatDateTime(log.clock_out) : 'In Progress'}</td>
                                 <td>${log.total_hours ? log.total_hours.toFixed(2) + 'h' : '-'}</td>
-                                <td>${log.late_flag ? 'Late' : ''}${log.early_checkout_flag ? ' Early' : ''}${!log.late_flag && !log.early_checkout_flag ? 'OK' : ''}</td>
+                                <td>${log.late_flag ? 'Late' : ''}${log.early_checkout_flag ? ' Early' : ''}${log.late_clock_out_minutes ? ` Late Out (${log.late_clock_out_minutes}m)` : ''}${!log.late_flag && !log.early_checkout_flag && !log.late_clock_out_minutes ? 'OK' : ''}</td>
                             </tr>
                         `).join('')}
                     </tbody>
@@ -317,7 +311,7 @@ export default function ReportsPage() {
                             <tr>
                                 <td>${escapeHtml(task.tasks?.title || 'Unknown')}</td>
                                 <td>${escapeHtml(task.employees?.display_name || 'Unassigned')}</td>
-                                <td>${formatDate(task.scheduled_date)}</td>
+                                <td>${formatDateOnly(task.scheduled_date)}</td>
                                 <td>${escapeHtml(task.status)}</td>
                                 <td>${escapeHtml(task.tasks?.location || '-')}</td>
                             </tr>
@@ -434,15 +428,17 @@ export default function ReportsPage() {
 
         if (selectedReport === 'attendance') {
             filename = `attendance_report_${startDate}_to_${endDate}.csv`
-            headers = ['Employee', 'Position', 'Clock In', 'Clock Out', 'Hours', 'Late', 'Early Out']
+            headers = ['Employee', 'Position', 'Clock In', 'Clock Out', 'Actual Clock Out', 'Hours', 'Late', 'Early Out', 'Late Out (min)']
             rows = attendanceLogs.map(log => [
                 log.employees?.display_name || 'Unknown',
                 log.employees?.position || '',
                 formatDateTime(log.clock_in),
                 log.clock_out ? formatDateTime(log.clock_out) : '',
+                log.actual_clock_out ? formatDateTime(log.actual_clock_out) : '',
                 log.total_hours ? log.total_hours.toFixed(2) : '',
                 log.late_flag ? 'Yes' : 'No',
-                log.early_checkout_flag ? 'Yes' : 'No'
+                log.early_checkout_flag ? 'Yes' : 'No',
+                log.late_clock_out_minutes ? log.late_clock_out_minutes.toString() : ''
             ])
             rows.push([])
             rows.push(['Summary'])
@@ -456,7 +452,7 @@ export default function ReportsPage() {
             rows = taskCompletions.map(task => [
                 task.tasks?.title || 'Unknown',
                 task.employees?.display_name || 'Unassigned',
-                formatDate(task.scheduled_date),
+                formatDateOnly(task.scheduled_date),
                 task.status,
                 task.tasks?.location || '',
                 task.notes ? 'Yes' : 'No',
@@ -477,8 +473,8 @@ export default function ReportsPage() {
                 return [
                     event.title || 'Untitled',
                     formatDate(event.start_time),
-                    new Date(event.start_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
-                    event.end_time ? new Date(event.end_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : '',
+                    formatTime(event.start_time),
+                    event.end_time ? formatTime(event.end_time) : '',
                     event.room || '',
                     (event.event_staff_assignments?.length || 0).toString(),
                     completed.toString(),
@@ -719,7 +715,7 @@ export default function ReportsPage() {
                                                         {task.employees?.display_name || 'Unassigned'}
                                                     </td>
                                                     <td className="px-4 py-3 text-sm">
-                                                        {formatDate(task.scheduled_date)}
+                                                        {formatDateOnly(task.scheduled_date)}
                                                     </td>
                                                     <td className="px-4 py-3">
                                                         <span className={`badge text-xs ${task.status === 'completed' ? 'badge-success' :
@@ -814,17 +810,25 @@ export default function ReportsPage() {
                                                         {log.clock_out ? formatDateTime(log.clock_out) : (
                                                             <span className="text-green-600 font-medium">In Progress</span>
                                                         )}
+                                                        {log.actual_clock_out && (
+                                                            <div className="text-xs text-muted-foreground">
+                                                                Actual: {formatDateTime(log.actual_clock_out)}
+                                                            </div>
+                                                        )}
                                                     </td>
                                                     <td className="px-4 py-3 text-sm">
                                                         {log.total_hours ? `${log.total_hours.toFixed(2)}h` : '-'}
                                                     </td>
                                                     <td className="px-4 py-3">
-                                                        <div className="flex gap-1">
+                                                        <div className="flex gap-1 flex-wrap">
                                                             {log.late_flag && (
                                                                 <span className="badge badge-warning text-xs">Late</span>
                                                             )}
                                                             {log.early_checkout_flag && (
                                                                 <span className="badge badge-warning text-xs">Early</span>
+                                                            )}
+                                                            {log.late_clock_out_minutes && (
+                                                                <span className="badge badge-warning text-xs">Late Out ({log.late_clock_out_minutes}m)</span>
                                                             )}
                                                             {!log.clock_out && (
                                                                 <span className="badge badge-success text-xs">Active</span>
@@ -913,8 +917,8 @@ export default function ReportsPage() {
                                                         <td className="px-4 py-3 text-sm">
                                                             <p>{formatDate(event.start_time)}</p>
                                                             <p className="text-xs text-muted-foreground">
-                                                                {new Date(event.start_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
-                                                                {event.end_time && ` - ${new Date(event.end_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}`}
+                                                                {formatTime(event.start_time)}
+                                                                {event.end_time && ` - ${formatTime(event.end_time)}`}
                                                             </p>
                                                         </td>
                                                         <td className="px-4 py-3 text-sm">
@@ -1087,7 +1091,7 @@ export default function ReportsPage() {
                                 <div>
                                     <h2 className="text-xl font-bold">{selectedCompletion.tasks?.title}</h2>
                                     <p className="text-muted-foreground">
-                                        {selectedCompletion.employees?.display_name || 'Unassigned'} • {formatDate(selectedCompletion.scheduled_date)}
+                                        {selectedCompletion.employees?.display_name || 'Unassigned'} • {formatDateOnly(selectedCompletion.scheduled_date)}
                                     </p>
                                 </div>
                                 <button

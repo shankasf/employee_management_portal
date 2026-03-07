@@ -6,6 +6,7 @@ import { formatDateTime } from '@/lib/utils'
 import { usePolicies, useEmployees, invalidateQueries } from '@/lib/hooks/useData'
 import { MediaType } from '@/types/supabase'
 import { RichTextEditor, RichTextDisplay } from '@/components/RichTextEditor'
+import { logValidationRejection, startUpload } from '@/lib/upload-logger'
 
 interface PolicyStrip {
     id: string
@@ -81,6 +82,7 @@ export default function PoliciesPage() {
     }
 
     async function uploadMedia(file: File, type: 'image' | 'video'): Promise<string> {
+        const tracker = startUpload(file, 'policy-media', 'admin_policy_media')
         const supabase = createClient()
         const fileExt = file.name.split('.').pop()
         const fileName = `${type}-${Date.now()}.${fileExt}`
@@ -89,8 +91,12 @@ export default function PoliciesPage() {
             .from('policy-media')
             .upload(fileName, file)
 
-        if (uploadError) throw uploadError
+        if (uploadError) {
+            tracker.failure(uploadError)
+            throw uploadError
+        }
 
+        tracker.success(fileName)
         const { data } = supabase.storage
             .from('policy-media')
             .getPublicUrl(fileName)
@@ -184,6 +190,7 @@ export default function PoliciesPage() {
         } else if (file.type.startsWith('video/')) {
             setMediaType('video')
         } else {
+            logValidationRejection(file, 'Not an image or video file', 'admin_policy_media', 'policy-media')
             alert('Please select an image or video file')
             return
         }

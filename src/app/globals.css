@@ -124,21 +124,23 @@ body {
   .scrollbar-visible {
     overflow-x: scroll !important;
     -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: var(--muted-foreground) var(--muted);
   }
 
   .scrollbar-visible::-webkit-scrollbar {
-    height: 8px;
+    height: 10px;
     display: block !important;
   }
 
   .scrollbar-visible::-webkit-scrollbar-track {
     background: var(--muted);
-    border-radius: 4px;
+    border-radius: 5px;
   }
 
   .scrollbar-visible::-webkit-scrollbar-thumb {
     background: var(--muted-foreground);
-    border-radius: 4px;
+    border-radius: 5px;
   }
 
   .scrollbar-visible::-webkit-scrollbar-thumb:hover {
@@ -385,6 +387,11 @@ body {
   .tab-button-inactive {
     @apply tab-button border-transparent text-muted-foreground hover:text-foreground;
   }
+}
+
+/* Hide native fullscreen button from video controls */
+video::-webkit-media-controls-fullscreen-button {
+  display: none;
 }
 
 /* Animations */

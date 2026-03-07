@@ -32,7 +32,6 @@ const fromName = process.env.SMTP_FROM_NAME || 'PlayFunia Employee Portal'
 
 // Admin emails - always receive notifications
 const ADMIN_EMAILS = [
-  process.env.ADMIN_NOTIFICATION_EMAIL || 'callsphereny@gmail.com',
   'playfunia@playfunia.com',
 ].filter(Boolean)
 
@@ -50,6 +49,7 @@ export type EmailType =
   | 'schedule_cancelled_by_admin'
   | 'task_assigned'
   | 'task_completed'
+  | 'task_reminder'
   | 'event_assigned'
   | 'event_removed'
 
@@ -301,7 +301,7 @@ export async function sendScheduleAssignedEmail(data: ScheduleEmailData): Promis
 
   const employeeResult = await sendEmail({
     to: data.employeeEmail,
-    subject: `New Schedule Assigned - ${data.scheduleDate}`,
+    subject: `New Schedule Assigned - ${escapeHtml(data.scheduleDate)}`,
     html: employeeHtml,
   })
 
@@ -331,7 +331,7 @@ export async function sendScheduleAssignedEmail(data: ScheduleEmailData): Promis
 
     await sendEmail({
       to: recipients,
-      subject: `Schedule Assigned - ${escapeHtml(data.employeeName)} (${data.scheduleDate})`,
+      subject: `Schedule Assigned - ${escapeHtml(data.employeeName)} (${escapeHtml(data.scheduleDate)})`,
       html: adminHtml,
     })
   }
@@ -375,7 +375,7 @@ export async function sendScheduleConfirmedEmail(data: ScheduleConfirmedEmailDat
 
   const employeeResult = await sendEmail({
     to: data.employeeEmail,
-    subject: `Schedule Confirmed - ${data.scheduleDate}`,
+    subject: `Schedule Confirmed - ${escapeHtml(data.scheduleDate)}`,
     html: employeeHtml,
   })
 
@@ -406,7 +406,7 @@ export async function sendScheduleConfirmedEmail(data: ScheduleConfirmedEmailDat
 
     const adminResult = await sendEmail({
       to: recipients,
-      subject: `Schedule Confirmed - ${escapeHtml(data.employeeName)} (${data.scheduleDate})`,
+      subject: `Schedule Confirmed - ${escapeHtml(data.employeeName)} (${escapeHtml(data.scheduleDate)})`,
       html: adminHtml,
     })
     console.log('[Schedule Confirmed Email] Admin email result:', adminResult)
@@ -454,7 +454,7 @@ export async function sendCancellationRequestEmail(data: CancellationRequestEmai
 
   return sendEmail({
     to: recipients,
-    subject: `Cancellation Request - ${escapeHtml(data.employeeName)} (${data.scheduleDate})`,
+    subject: `Cancellation Request - ${escapeHtml(data.employeeName)} (${escapeHtml(data.scheduleDate)})`,
     html,
   })
 }
@@ -489,7 +489,7 @@ export async function sendCancellationApprovedEmail(data: CancellationApprovedEm
   // Send to employee
   const employeeResult = await sendEmail({
     to: data.employeeEmail,
-    subject: `Schedule Cancellation Approved - ${data.scheduleDate}`,
+    subject: `Schedule Cancellation Approved - ${escapeHtml(data.scheduleDate)}`,
     html,
   })
 
@@ -498,7 +498,7 @@ export async function sendCancellationApprovedEmail(data: CancellationApprovedEm
   if (recipients.length > 0) {
     await sendEmail({
       to: recipients,
-      subject: `Schedule Cancelled - ${escapeHtml(data.employeeName)} (${data.scheduleDate})`,
+      subject: `Schedule Cancelled - ${escapeHtml(data.employeeName)} (${escapeHtml(data.scheduleDate)})`,
       html: wrapInTemplate(`
         <div class="header" style="background: linear-gradient(135deg, #6b7280 0%, #4b5563 100%);">
           <h1>Schedule Cancelled</h1>
@@ -552,7 +552,7 @@ export async function sendAdminCancelledEmail(data: AdminCancelledEmailData): Pr
 
   const employeeResult = await sendEmail({
     to: data.employeeEmail,
-    subject: `Schedule Cancelled - ${data.scheduleDate}`,
+    subject: `Schedule Cancelled - ${escapeHtml(data.scheduleDate)}`,
     html: employeeHtml,
   })
 
@@ -582,7 +582,7 @@ export async function sendAdminCancelledEmail(data: AdminCancelledEmailData): Pr
 
     await sendEmail({
       to: recipients,
-      subject: `Schedule Cancelled - ${escapeHtml(data.employeeName)} (${data.scheduleDate})`,
+      subject: `Schedule Cancelled - ${escapeHtml(data.employeeName)} (${escapeHtml(data.scheduleDate)})`,
       html: adminHtml,
     })
   }
@@ -626,7 +626,7 @@ export async function sendScheduleDeletedEmail(data: ScheduleDeletedEmailData): 
 
   const employeeResult = await sendEmail({
     to: data.employeeEmail,
-    subject: `Schedule Deleted - ${data.scheduleDate}`,
+    subject: `Schedule Deleted - ${escapeHtml(data.scheduleDate)}`,
     html: employeeHtml,
   })
 
@@ -656,7 +656,7 @@ export async function sendScheduleDeletedEmail(data: ScheduleDeletedEmailData): 
 
     await sendEmail({
       to: recipients,
-      subject: `Schedule Deleted - ${escapeHtml(data.employeeName)} (${data.scheduleDate})`,
+      subject: `Schedule Deleted - ${escapeHtml(data.employeeName)} (${escapeHtml(data.scheduleDate)})`,
       html: adminHtml,
     })
   }
@@ -779,6 +779,96 @@ export async function sendTaskCompletedEmail(data: TaskCompletedEmailData): Prom
   return sendEmail({
     to: recipients,
     subject: `Task Completed - ${escapeHtml(data.taskTitle)} by ${escapeHtml(data.employeeName)}`,
+    html,
+  })
+}
+
+// ============================================
+// TASK REMINDER EMAIL
+// ============================================
+
+interface TaskReminderEmailData {
+  employeeName: string
+  employeeEmail: string
+  taskNames: string[]
+}
+
+export async function sendTaskReminderEmail(data: TaskReminderEmailData): Promise<{ success: boolean; error?: string }> {
+  const taskListHtml = data.taskNames
+    .map(name => `<li style="padding: 4px 0;">${escapeHtml(name)}</li>`)
+    .join('')
+
+  const html = wrapInTemplate(`
+    <div class="header" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);">
+      <h1>Reminder to Finish Tasks</h1>
+    </div>
+    <div class="content">
+      <p>Hi ${escapeHtml(data.employeeName)},</p>
+      <p>You clocked out with the following tasks still pending:</p>
+
+      <div class="info-box">
+        <p class="label">Pending Tasks</p>
+        <ul style="margin: 8px 0; padding-left: 20px;">
+          ${taskListHtml}
+        </ul>
+      </div>
+
+      <p>Please complete these tasks as soon as possible.</p>
+
+      <p style="text-align: center;">
+        <a href="https://admin.playfunia.com/employee/tasks" class="button" style="background: #f59e0b;">View Tasks</a>
+      </p>
+    </div>
+  `)
+
+  return sendEmail({
+    to: data.employeeEmail,
+    subject: 'Reminder to finish task',
+    html,
+  })
+}
+
+// ============================================
+// TASK DEADLINE REMINDER EMAIL
+// ============================================
+
+interface TaskDeadlineReminderEmailData {
+  employeeName: string
+  employeeEmail: string
+  taskTitle: string
+  taskDescription?: string
+  scheduledDate: string
+  cutoffTime: string
+  location?: string
+}
+
+export async function sendTaskDeadlineReminderEmail(data: TaskDeadlineReminderEmailData): Promise<{ success: boolean; error?: string }> {
+  const html = wrapInTemplate(`
+    <div class="header" style="background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);">
+      <h1>Task Deadline Reminder</h1>
+    </div>
+    <div class="content">
+      <p>Hi ${escapeHtml(data.employeeName)},</p>
+      <p>This is a reminder that your task is due soon. Please complete it before the deadline.</p>
+
+      <div class="info-box">
+        <p class="label">Task Details</p>
+        <p><strong>Task:</strong> ${escapeHtml(data.taskTitle)}</p>
+        ${data.taskDescription ? `<p><strong>Description:</strong> ${escapeHtml(data.taskDescription)}</p>` : ''}
+        <p><strong>Date:</strong> ${escapeHtml(data.scheduledDate)}</p>
+        <p><strong>Deadline:</strong> ${escapeHtml(data.cutoffTime)}</p>
+        ${data.location ? `<p><strong>Location:</strong> ${escapeHtml(data.location)}</p>` : ''}
+      </div>
+
+      <p style="text-align: center;">
+        <a href="https://admin.playfunia.com/employee/tasks" class="button" style="background: #f97316;">Complete Task Now</a>
+      </p>
+    </div>
+  `)
+
+  return sendEmail({
+    to: data.employeeEmail,
+    subject: `Deadline Reminder: ${data.taskTitle}`,
     html,
   })
 }

@@ -18,9 +18,6 @@ async function migrate() {
   console.log('Running database migrations...\n');
 
   const migrations = [
-    // Add hourly_rate to employees
-    `ALTER TABLE employees ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(10,2)`,
-
     // Clock In location fields
     `ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_lat NUMERIC(10,7)`,
     `ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_lng NUMERIC(10,7)`,
@@ -39,37 +36,43 @@ async function migrate() {
     `ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS notes TEXT`,
   ];
 
+  let failures = 0;
   for (const sql of migrations) {
     try {
       const { error } = await supabase.rpc('exec_sql', { query: sql });
       if (error) {
-        // Try direct query if RPC not available
-        const { error: directError } = await supabase.from('_migrations').select('*').limit(0);
-        console.log(`Note: ${sql.substring(0, 50)}... - RPC not available, migrations may need to be run manually`);
+        failures++;
+        console.error(`✗ ${sql.substring(0, 60)}... - ${error.message}`);
       } else {
         console.log(`✓ ${sql.substring(0, 60)}...`);
       }
     } catch (err) {
-      console.log(`Note: ${sql.substring(0, 50)}... - requires manual execution`);
+      failures++;
+      console.error(`✗ ${sql.substring(0, 60)}... - ${err.message || 'requires manual execution'}`);
     }
   }
 
-  console.log('\n✅ Migration script completed!');
-  console.log('\nIf migrations failed, please run the following SQL in your Supabase SQL Editor:\n');
-  console.log('-- Add hourly_rate to employees');
-  console.log('ALTER TABLE employees ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC(10,2);');
-  console.log('\n-- Add location and time tracking fields to attendance_logs');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_lat NUMERIC(10,7);');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_lng NUMERIC(10,7);');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_accuracy NUMERIC(10,2);');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_location_status TEXT DEFAULT \'unknown\';');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_out_lat NUMERIC(10,7);');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_out_lng NUMERIC(10,7);');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_out_accuracy NUMERIC(10,2);');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_out_location_status TEXT DEFAULT \'unknown\';');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS break_minutes INTEGER DEFAULT 0;');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS work_type TEXT DEFAULT \'regular\';');
-  console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS notes TEXT;');
+  if (failures > 0) {
+    console.error(`\n❌ ${failures} migration(s) failed!`);
+  } else {
+    console.log('\n✅ All migrations completed successfully!');
+  }
+  if (failures > 0) {
+    console.log('\nPlease run the following SQL in your Supabase SQL Editor:\n');
+    console.log('-- Add location and time tracking fields to attendance_logs');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_lat NUMERIC(10,7);');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_lng NUMERIC(10,7);');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_accuracy NUMERIC(10,2);');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_in_location_status TEXT DEFAULT \'unknown\';');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_out_lat NUMERIC(10,7);');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_out_lng NUMERIC(10,7);');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_out_accuracy NUMERIC(10,2);');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS clock_out_location_status TEXT DEFAULT \'unknown\';');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS break_minutes INTEGER DEFAULT 0;');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS work_type TEXT DEFAULT \'regular\';');
+    console.log('ALTER TABLE attendance_logs ADD COLUMN IF NOT EXISTS notes TEXT;');
+    process.exit(1);
+  }
 }
 
 migrate().catch(console.error);

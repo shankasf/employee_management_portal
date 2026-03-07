@@ -51,7 +51,12 @@ export async function GET(request: NextRequest) {
         completed_at,
         notes,
         photo_url,
+        photo_urls,
         video_url,
+        video_urls,
+        media_deleted_at,
+        media_deleted_by,
+        media_deleted_by_name,
         created_at,
         tasks (
           id,

@@ -105,7 +105,6 @@ export type Database = {
           emergency_contact_name: string | null;
           emergency_contact_phone: string | null;
           hr_notes: string | null;
-          hourly_rate: number | null;
           // Device registration
           registered_device_id: string | null;
           device_registered_at: string | null;
@@ -138,7 +137,6 @@ export type Database = {
           emergency_contact_name?: string | null;
           emergency_contact_phone?: string | null;
           hr_notes?: string | null;
-          hourly_rate?: number | null;
           registered_device_id?: string | null;
           device_registered_at?: string | null;
           device_name?: string | null;
@@ -170,7 +168,6 @@ export type Database = {
           emergency_contact_name?: string | null;
           emergency_contact_phone?: string | null;
           hr_notes?: string | null;
-          hourly_rate?: number | null;
           registered_device_id?: string | null;
           device_registered_at?: string | null;
           device_name?: string | null;
@@ -201,6 +198,9 @@ export type Database = {
           clock_out_lng: number | null;
           clock_out_accuracy: number | null;
           clock_out_location_status: string | null;
+          // Late clock-out tracking
+          actual_clock_out: string | null;
+          late_clock_out_minutes: number | null;
           // Other fields
           break_minutes: number | null;
           work_type: string | null;
@@ -228,6 +228,8 @@ export type Database = {
           clock_out_lng?: number | null;
           clock_out_accuracy?: number | null;
           clock_out_location_status?: string | null;
+          actual_clock_out?: string | null;
+          late_clock_out_minutes?: number | null;
           break_minutes?: number | null;
           work_type?: string | null;
           notes?: string | null;
@@ -254,6 +256,8 @@ export type Database = {
           clock_out_lng?: number | null;
           clock_out_accuracy?: number | null;
           clock_out_location_status?: string | null;
+          actual_clock_out?: string | null;
+          late_clock_out_minutes?: number | null;
           break_minutes?: number | null;
           work_type?: string | null;
           notes?: string | null;
@@ -330,6 +334,10 @@ export type Database = {
           photo_urls: string[] | null;
           video_url: string | null;
           video_urls: string[] | null;
+          media_deleted_at: string | null;
+          media_deleted_by: string | null;
+          media_deleted_by_name: string | null;
+          reminder_sent_at: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -345,6 +353,10 @@ export type Database = {
           photo_urls?: string[] | null;
           video_url?: string | null;
           video_urls?: string[] | null;
+          media_deleted_at?: string | null;
+          media_deleted_by?: string | null;
+          media_deleted_by_name?: string | null;
+          reminder_sent_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -360,6 +372,10 @@ export type Database = {
           photo_urls?: string[] | null;
           video_url?: string | null;
           video_urls?: string[] | null;
+          media_deleted_at?: string | null;
+          media_deleted_by?: string | null;
+          media_deleted_by_name?: string | null;
+          reminder_sent_at?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -764,6 +780,71 @@ export type Database = {
           created_at?: string;
         };
       };
+      upload_logs: {
+        Row: {
+          id: string;
+          user_id: string | null;
+          user_email: string | null;
+          user_role: string | null;
+          status: string;
+          bucket: string | null;
+          file_name: string | null;
+          file_size: number | null;
+          mime_type: string | null;
+          file_path: string | null;
+          upload_context: string | null;
+          entity_id: string | null;
+          error_message: string | null;
+          error_code: string | null;
+          user_agent: string | null;
+          device_name: string | null;
+          ip_address: string | null;
+          duration_ms: number | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id?: string | null;
+          user_email?: string | null;
+          user_role?: string | null;
+          status: string;
+          bucket?: string | null;
+          file_name?: string | null;
+          file_size?: number | null;
+          mime_type?: string | null;
+          file_path?: string | null;
+          upload_context?: string | null;
+          entity_id?: string | null;
+          error_message?: string | null;
+          error_code?: string | null;
+          user_agent?: string | null;
+          device_name?: string | null;
+          ip_address?: string | null;
+          duration_ms?: number | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string | null;
+          user_email?: string | null;
+          user_role?: string | null;
+          status?: string;
+          bucket?: string | null;
+          file_name?: string | null;
+          file_size?: number | null;
+          mime_type?: string | null;
+          file_path?: string | null;
+          upload_context?: string | null;
+          entity_id?: string | null;
+          error_message?: string | null;
+          error_code?: string | null;
+          user_agent?: string | null;
+          device_name?: string | null;
+          ip_address?: string | null;
+          duration_ms?: number | null;
+          created_at?: string;
+        };
+      };
     };
     Views: {
       employee_recent_transactions: {
@@ -957,6 +1038,7 @@ export type ScheduleEmailLog = Tables<"schedule_email_logs">;
 export type NotificationRecipient = Tables<"notification_recipients">;
 export type ActivityLog = Tables<"activity_logs">;
 export type UsageLog = Tables<"usage_logs">;
+export type UploadLog = Tables<"upload_logs">;
 
 // Extended types with relations
 export type EmployeeWithProfile = Employee & {

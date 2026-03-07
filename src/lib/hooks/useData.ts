@@ -14,7 +14,7 @@ import useSWR, { SWRConfiguration, mutate } from 'swr'
 import { createUntypedClient, isAuthError, refreshSession } from '@/lib/supabase/client'
 import { getCacheTimings } from '@/lib/cookiePreferences'
 import { useAuth } from '@/contexts/AuthContext'
-import { NY_TIMEZONE } from '@/lib/utils'
+import { getNYDayBoundary, getTodayNY } from '@/lib/utils'
 
 // PERFORMANCE: Only log in development
 const isDev = process.env.NODE_ENV === 'development';
@@ -43,12 +43,7 @@ function getTodayString(): string {
   const now = Date.now()
   // Refresh cache if more than 60 seconds old (catches day changes)
   if (now - cachedTodayTimestamp > 60000) {
-    // Use New York timezone for consistent date across the app
-    const nyDate = new Date(new Date().toLocaleString("en-US", { timeZone: NY_TIMEZONE }))
-    const year = nyDate.getFullYear()
-    const month = String(nyDate.getMonth() + 1).padStart(2, '0')
-    const day = String(nyDate.getDate()).padStart(2, '0')
-    cachedToday = `${year}-${month}-${day}`
+    cachedToday = getTodayNY()
     cachedTodayTimestamp = now
   }
   return cachedToday
@@ -324,22 +319,9 @@ export function useAttendance(dateFilter: string) {
   return useSWR(
     key,
     async () => {
-      // Use NY timezone offset to create correct day boundaries
-      // Determine NY offset using Intl API (works regardless of browser timezone)
-      const getNYOffset = (dateStr: string) => {
-        const dt = new Date(`${dateStr}T12:00:00Z`) // noon UTC to avoid edge cases
-        const nyStr = dt.toLocaleString('en-US', { timeZone: NY_TIMEZONE, hour12: false, hour: '2-digit', minute: '2-digit' })
-        const utcStr = dt.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit', minute: '2-digit' })
-        const [nyH, nyM] = nyStr.split(':').map(Number)
-        const [utcH, utcM] = utcStr.split(':').map(Number)
-        const diffMinutes = (nyH * 60 + nyM) - (utcH * 60 + utcM)
-        const offsetHours = Math.round(diffMinutes / 60)
-        return offsetHours // -5 for EST, -4 for EDT
-      }
-      const nyOffset = getNYOffset(dateFilter)
-      const offsetStr = `${nyOffset < 0 ? '-' : '+'}${String(Math.abs(nyOffset)).padStart(2, '0')}:00`
-      const startOfDay = new Date(`${dateFilter}T00:00:00${offsetStr}`)
-      const endOfDay = new Date(`${dateFilter}T23:59:59.999${offsetStr}`)
+      // Use centralized NY timezone day boundaries
+      const startOfDay = getNYDayBoundary(dateFilter, 'start')
+      const endOfDay = getNYDayBoundary(dateFilter, 'end')
 
       const { data, error } = await supabase
         .from('attendance_logs')
@@ -351,8 +333,8 @@ export function useAttendance(dateFilter: string) {
             position
           )
         `)
-        .gte('clock_in', startOfDay.toISOString())
-        .lte('clock_in', endOfDay.toISOString())
+        .gte('clock_in', startOfDay)
+        .lte('clock_in', endOfDay)
         .order('clock_in', { ascending: false })
         .limit(500)  // PERFORMANCE: Limit attendance records per day
 
@@ -372,19 +354,10 @@ export function useEvents(filter: 'upcoming' | 'today' | 'past' = 'upcoming') {
   return useSWR(
     key,
     async () => {
-      // Use NY timezone for consistent "today" boundaries
-      // Get today's date string in NY timezone
-      const nyDateStr = new Date().toLocaleDateString("en-CA", { timeZone: NY_TIMEZONE }) // YYYY-MM-DD format
-      // Get the NY offset for today using Intl API
-      const nowUtc = new Date(`${nyDateStr}T12:00:00Z`)
-      const nyTimeStr = nowUtc.toLocaleString('en-US', { timeZone: NY_TIMEZONE, hour12: false, hour: '2-digit', minute: '2-digit' })
-      const utcTimeStr = nowUtc.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit', minute: '2-digit' })
-      const [nyH, nyMin] = nyTimeStr.split(':').map(Number)
-      const [utcH] = utcTimeStr.split(':').map(Number)
-      const nyOffsetHours = Math.round(((nyH * 60 + nyMin) - (utcH * 60 + 0)) / 60)
-      const offsetStr = `${nyOffsetHours < 0 ? '-' : '+'}${String(Math.abs(nyOffsetHours)).padStart(2, '0')}:00`
-      const todayStart = new Date(`${nyDateStr}T00:00:00${offsetStr}`)
-      const todayEnd = new Date(`${nyDateStr}T23:59:59${offsetStr}`)
+      // Use centralized NY timezone day boundaries for "today"
+      const nyDateStr = getTodayNY()
+      const todayStart = getNYDayBoundary(nyDateStr, 'start')
+      const todayEnd = getNYDayBoundary(nyDateStr, 'end')
 
       let query = supabase
         .from('events')
@@ -405,8 +378,8 @@ export function useEvents(filter: 'upcoming' | 'today' | 'past' = 'upcoming') {
         query = query.gte('start_time', new Date().toISOString())
       } else if (filter === 'today') {
         query = query
-          .gte('start_time', todayStart.toISOString())
-          .lte('start_time', todayEnd.toISOString())
+          .gte('start_time', todayStart)
+          .lte('start_time', todayEnd)
       } else {
         query = query.lt('start_time', new Date().toISOString())
       }
@@ -515,6 +488,36 @@ export function useActiveEmployees() {
 
       if (error) throw error
       return data || []
+    },
+    getLongCacheConfig()
+  )
+}
+
+/**
+ * Fetch active employees + admins for task assignment dropdowns.
+ * Returns employees with an `is_admin` flag so the UI can badge admins.
+ */
+export function useAssignableUsers() {
+  const key = useAuthGatedKey('admin:assignable-users')
+
+  return useSWR(
+    key,
+    async () => {
+      const { data, error } = await supabase
+        .from('employees')
+        .select('id, display_name, position, profiles(role)')
+        .eq('is_active', true)
+        .order('display_name')
+        .limit(200)
+
+      if (error) throw error
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (data || []).map((emp: any) => ({
+        id: emp.id,
+        display_name: emp.display_name,
+        position: emp.position,
+        is_admin: emp.profiles?.role === 'admin',
+      }))
     },
     getLongCacheConfig()
   )
@@ -952,6 +955,7 @@ export const invalidateQueries = {
     : mutate((key: any) => Array.isArray(key) && key[0] === 'admin:attendance', undefined, { revalidate: true }),
   events: () => mutate((key: any) => Array.isArray(key) && key[0] === 'admin:events', undefined, { revalidate: true }),
   tasks: () => mutate('admin:tasks'),
+  assignableUsers: () => mutate('admin:assignable-users'),
   policies: () => mutate((key: any) => {
     if (typeof key === 'string') return key.startsWith('admin:policies') || key.startsWith('employee:policies')
     return false

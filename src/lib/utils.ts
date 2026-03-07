@@ -51,6 +51,20 @@ const weekdayFormatter = new Intl.DateTimeFormat("en-US", {
   day: "numeric",
 });
 
+const shortWeekdayDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: NY_TIMEZONE,
+  weekday: "short",
+  month: "short",
+  day: "numeric",
+});
+
+const shortDateFormatter = new Intl.DateTimeFormat("en-US", {
+  timeZone: NY_TIMEZONE,
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+});
+
 const relativeTimeFormatter = new Intl.RelativeTimeFormat("en-US", {
   numeric: "auto",
 });
@@ -80,6 +94,20 @@ export function formatDateTime(date: string | Date): string {
     return '-';
   }
   return dateTimeFormatter.format(d);
+}
+
+// Format short date with weekday (e.g., "Mon, Jan 5")
+export function formatShortDateWithWeekday(date: string | Date): string {
+  const d = typeof date === 'string' ? new Date(date) : date;
+  if (isNaN(d.getTime())) return '-';
+  return shortWeekdayDateFormatter.format(d);
+}
+
+// Format short date (e.g., "Jan 5, 2026")
+export function formatShortDate(date: string | Date): string {
+  const d = typeof date === 'string' ? new Date(date) : date;
+  if (isNaN(d.getTime())) return '-';
+  return shortDateFormatter.format(d);
 }
 
 // Format date with weekday for display
@@ -124,41 +152,126 @@ export function getCurrentNYTime(): string {
 
 // Get today's date in New York timezone as YYYY-MM-DD string
 export function getTodayNY(): string {
-  const now = new Date();
-  const nyDate = new Date(now.toLocaleString("en-US", { timeZone: NY_TIMEZONE }));
-  const year = nyDate.getFullYear();
-  const month = String(nyDate.getMonth() + 1).padStart(2, '0');
-  const day = String(nyDate.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return new Date().toLocaleDateString("en-CA", { timeZone: NY_TIMEZONE }); // en-CA gives YYYY-MM-DD
 }
 
 // Get a date N days from today in New York timezone as YYYY-MM-DD string
 export function getDateNY(daysFromToday: number = 0): string {
-  const now = new Date();
-  const nyDate = new Date(now.toLocaleString("en-US", { timeZone: NY_TIMEZONE }));
-  nyDate.setDate(nyDate.getDate() + daysFromToday);
-  const year = nyDate.getFullYear();
-  const month = String(nyDate.getMonth() + 1).padStart(2, '0');
-  const day = String(nyDate.getDate()).padStart(2, '0');
+  if (daysFromToday === 0) return getTodayNY();
+  const today = getTodayNY();
+  const [y, m, d] = today.split('-').map(Number);
+  // Use noon to avoid DST boundary issues during date arithmetic
+  const adjusted = new Date(y, m - 1, d + daysFromToday, 12, 0, 0);
+  const year = adjusted.getFullYear();
+  const month = String(adjusted.getMonth() + 1).padStart(2, '0');
+  const day = String(adjusted.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 }
 
+// Get current month in NY timezone as YYYY-MM string
+export function getCurrentMonthNY(): string {
+  return getTodayNY().slice(0, 7);
+}
+
+// Get the NY timezone UTC offset for a given date string (handles DST)
+// Returns offset string like "-05:00" (EST) or "-04:00" (EDT)
+export function getNYOffsetStr(dateStr: string): string {
+  const dt = new Date(`${dateStr}T12:00:00Z`); // noon UTC to avoid edge cases
+  const nyStr = dt.toLocaleString('en-US', { timeZone: NY_TIMEZONE, hour12: false, hour: '2-digit', minute: '2-digit' });
+  const utcStr = dt.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit', minute: '2-digit' });
+  const [nyH, nyM] = nyStr.split(':').map(Number);
+  const [utcH, utcM] = utcStr.split(':').map(Number);
+  const diffMinutes = (nyH * 60 + nyM) - (utcH * 60 + utcM);
+  const offsetHours = Math.round(diffMinutes / 60);
+  return `${offsetHours < 0 ? '-' : '+'}${String(Math.abs(offsetHours)).padStart(2, '0')}:00`;
+}
+
+// Get NY day boundary as ISO string (start or end of day in NY timezone)
+// Returns UTC ISO string that corresponds to midnight or 23:59:59.999 in NY
+export function getNYDayBoundary(dateStr: string, boundary: 'start' | 'end'): string {
+  const offset = getNYOffsetStr(dateStr);
+  if (boundary === 'start') {
+    return new Date(`${dateStr}T00:00:00${offset}`).toISOString();
+  }
+  return new Date(`${dateStr}T23:59:59.999${offset}`).toISOString();
+}
+
+// Get NY month boundaries as ISO strings for database queries
+// Returns { start, end } UTC ISO strings for the first and last day of the month in NY
+export function getNYMonthBoundaries(yearMonth: string): { start: string; end: string } {
+  const [year, month] = yearMonth.split('-').map(Number);
+  const firstDay = `${yearMonth}-01`;
+  const lastDayNum = new Date(year, month, 0).getDate();
+  const lastDay = `${yearMonth}-${String(lastDayNum).padStart(2, '0')}`;
+  return {
+    start: getNYDayBoundary(firstDay, 'start'),
+    end: getNYDayBoundary(lastDay, 'end'),
+  };
+}
+
+// Get current NY datetime components (for form defaults etc.)
+// Returns { year, month, day, hours, minutes } in NY timezone
+export function getNYDateTimeComponents(date?: Date): { year: string; month: string; day: string; hours: string; minutes: string } {
+  const d = date || new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: NY_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const get = (type: string) => parts.find(p => p.type === type)?.value || '00';
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+    hours: get('hour'),
+    minutes: get('minute'),
+  };
+}
+
+// Format a Date to a datetime-local input string (YYYY-MM-DDTHH:MM) in NY timezone
+export function toNYDateTimeString(date: Date): string {
+  const { year, month, day, hours, minutes } = getNYDateTimeComponents(date);
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+// Convert a datetime-local string (representing NY time) to a UTC ISO string for DB storage
+// Input: "2026-02-12T15:30" (NY time) → Output: "2026-02-12T20:30:00.000Z" (UTC, during EST)
+export function nyDateTimeToUTC(datetimeLocal: string): string {
+  const dateStr = datetimeLocal.slice(0, 10); // "YYYY-MM-DD"
+  const offset = getNYOffsetStr(dateStr);
+  return new Date(`${datetimeLocal}:00${offset}`).toISOString();
+}
+
 // Parse a YYYY-MM-DD date string as a local date (not UTC)
+// Uses noon to avoid timezone boundary issues
 export function parseLocalDate(dateStr: string): Date {
   const [year, month, day] = dateStr.split('-').map(Number);
-  return new Date(year, month - 1, day);
+  return new Date(year, month - 1, day, 12, 0, 0);
+}
+
+// Format a YYYY-MM-DD date string without timezone conversion
+// Safe for date-only fields (scheduled_date, date_of_birth, etc.)
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export function formatDateOnly(dateStr: string): string {
+  if (!dateStr) return '-';
+  const [year, month, day] = dateStr.split('-').map(Number);
+  if (!year || !month || !day) return dateStr;
+  return `${MONTH_NAMES[month - 1]} ${day}, ${year}`;
 }
 
 // Format a YYYY-MM-DD date string for display with weekday
 export function formatScheduleDate(dateStr: string): string {
-  const date = parseLocalDate(dateStr);
-  return date.toLocaleDateString('en-US', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    timeZone: NY_TIMEZONE,
-  });
+  if (!dateStr) return '-';
+  const [year, month, day] = dateStr.split('-').map(Number);
+  if (!year || !month || !day) return dateStr;
+  const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  // Use noon to avoid timezone boundary issues when computing weekday
+  const date = new Date(year, month - 1, day, 12, 0, 0);
+  return `${WEEKDAYS[date.getDay()]}, ${MONTH_NAMES[month - 1]} ${day}, ${year}`;
 }
 
 // Get relative time (e.g., "2 hours ago", "in 2 hours") using cached formatter
@@ -223,6 +336,19 @@ export function isValidPhone(phone: string): boolean {
 // Sanitize phone for search (remove non-digits)
 export function sanitizePhone(phone: string): string {
   return phone.replace(/\D/g, "");
+}
+
+// Get public URL for profile pictures (no signing, no expiry)
+export function getPublicProfilePicUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+
+  // If it's already a full URL (e.g. from user_metadata), return as-is
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!supabaseUrl) return null;
+
+  return `${supabaseUrl}/storage/v1/object/public/profile-pictures/${path}`;
 }
 
 // Get signed URL for storage file

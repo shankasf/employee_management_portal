@@ -35,7 +35,10 @@ export function RichTextEditor({
   // Initialize editor content
   useEffect(() => {
     if (editorRef.current && !isInitializedRef.current) {
-      editorRef.current.innerHTML = value || ''
+      editorRef.current.innerHTML = DOMPurify.sanitize(value || '', {
+        ALLOWED_TAGS: ['b', 'i', 'em', 'strong', 'p', 'br', 'ul', 'ol', 'li', 'a', 'span', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
+        ALLOWED_ATTR: ['href', 'target', 'rel', 'class', 'style'],
+      })
       isInitializedRef.current = true
     }
   }, [value])

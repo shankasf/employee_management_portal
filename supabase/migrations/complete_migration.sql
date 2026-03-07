@@ -244,6 +244,12 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'clock_out_device_name') THEN
         ALTER TABLE attendance_logs ADD COLUMN clock_out_device_name TEXT;
     END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'actual_clock_out') THEN
+        ALTER TABLE attendance_logs ADD COLUMN actual_clock_out TIMESTAMPTZ;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'attendance_logs' AND column_name = 'late_clock_out_minutes') THEN
+        ALTER TABLE attendance_logs ADD COLUMN late_clock_out_minutes INTEGER;
+    END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_attendance_logs_employee_clock_in ON attendance_logs (employee_id, clock_in);
@@ -1110,10 +1116,10 @@ GRANT SELECT ON employee_recent_transactions TO authenticated;
 -- PART 9: STORAGE BUCKETS
 -- =====================================================
 
--- Task media bucket with 10GB limit for large video uploads
+-- Task media bucket with no server-side size limit (client enforces 100GB per file)
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types) VALUES
-('task-media', 'task-media', FALSE, 10737418240, ARRAY['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/mpeg'])
-ON CONFLICT (id) DO UPDATE SET file_size_limit = 10737418240;
+('task-media', 'task-media', FALSE, NULL, ARRAY['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/mpeg', 'video/3gpp', 'video/3gpp2', 'video/x-matroska'])
+ON CONFLICT (id) DO UPDATE SET file_size_limit = NULL, allowed_mime_types = ARRAY['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm', 'video/x-msvideo', 'video/mpeg', 'video/3gpp', 'video/3gpp2', 'video/x-matroska'];
 
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types) VALUES
 ('policy-media', 'policy-media', TRUE, 104857600, ARRAY['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4', 'video/quicktime', 'video/webm'])
@@ -1136,6 +1142,8 @@ DROP POLICY IF EXISTS "Users can delete own task media" ON storage.objects;
 CREATE POLICY "Users can delete own task media" ON storage.objects FOR DELETE USING (bucket_id = 'task-media' AND (storage.foldername(name))[1] = auth.uid()::text);
 DROP POLICY IF EXISTS "Admins can delete task media" ON storage.objects;
 CREATE POLICY "Admins can delete task media" ON storage.objects FOR DELETE USING (bucket_id = 'task-media' AND EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND role = 'admin'));
+DROP POLICY IF EXISTS "Users can view task references" ON storage.objects;
+CREATE POLICY "Users can view task references" ON storage.objects FOR SELECT USING (bucket_id = 'task-media' AND (storage.foldername(name))[1] = 'task-references' AND auth.uid() IS NOT NULL);
 
 DROP POLICY IF EXISTS "Anyone can view policy media" ON storage.objects;
 CREATE POLICY "Anyone can view policy media" ON storage.objects FOR SELECT USING (bucket_id = 'policy-media');

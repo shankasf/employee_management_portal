@@ -1,6 +1,6 @@
 import { createClient, createUntypedClient } from "@/lib/supabase/client";
 import { Updatable, IdDocumentType } from "@/types/supabase";
-import { getTodayNY } from "@/lib/utils";
+import { getTodayNY, getNYDayBoundary } from "@/lib/utils";
 
 // Get all employees with profiles
 export async function getEmployees(includeInactive = false) {
@@ -105,13 +105,7 @@ export async function getClockedInToday() {
   const supabase = createClient();
   const today = getTodayNY();
 
-  // Get proper NY offset for today to create accurate UTC boundary
-  const noon = new Date(`${today}T12:00:00Z`)
-  const nyH = parseInt(noon.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit' }))
-  const utcH = parseInt(noon.toLocaleString('en-US', { timeZone: 'UTC', hour12: false, hour: '2-digit' }))
-  const offset = nyH - utcH
-  const offsetStr = `${offset < 0 ? '-' : '+'}${String(Math.abs(offset)).padStart(2, '0')}:00`
-  const startOfDay = new Date(`${today}T00:00:00${offsetStr}`).toISOString()
+  const startOfDay = getNYDayBoundary(today, 'start')
 
   const { data, error } = await supabase
     .from("attendance_logs")
@@ -233,7 +227,7 @@ export async function uploadEmployeeDocument(
 ): Promise<string> {
   const supabase = createClient();
 
-  const fileExt = file.name.split('.').pop();
+  const fileExt = file.name.split('.').pop() || 'bin';
   const fileName = `${employeeId}/id-document-${Date.now()}.${fileExt}`;
 
   const { error: uploadError } = await supabase.storage

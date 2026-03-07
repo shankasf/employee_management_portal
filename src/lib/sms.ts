@@ -458,6 +458,26 @@ export async function sendTaskCompletedSMS(data: TaskCompletedSMSData): Promise<
 }
 
 // ============================================
+// TASK DEADLINE REMINDER SMS
+// ============================================
+
+interface TaskDeadlineReminderSMSData {
+  employeeName: string
+  employeePhone: string
+  taskTitle: string
+  cutoffTime: string
+}
+
+export async function sendTaskDeadlineReminderSMS(data: TaskDeadlineReminderSMSData): Promise<{ success: boolean; error?: string }> {
+  const body = `Hi ${data.employeeName}, reminder: your task "${data.taskTitle}" is due at ${data.cutoffTime}. Please complete it before the deadline.`
+
+  return sendSMS({
+    to: data.employeePhone,
+    body,
+  })
+}
+
+// ============================================
 // EVENT SMS
 // ============================================
 

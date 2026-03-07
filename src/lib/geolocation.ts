@@ -166,7 +166,7 @@ export async function captureLocation(timeoutMs: number = 15000): Promise<Locati
       },
       {
         enableHighAccuracy: true,
-        timeout: timeoutMs - 5000, // Leave time for fallback
+        timeout: Math.max(3000, timeoutMs - 5000), // Leave time for fallback
         maximumAge: 0,
       }
     );
@@ -205,7 +205,34 @@ export function formatLocationStatus(status: string | null): { text: string; col
     case 'prompt':
       return { text: 'Permission Required', color: 'text-blue-600', icon: '📍' };
     default:
-      return { text: 'Unknown', color: 'text-gray-500', icon: '❓' };
+      return { text: '-', color: 'text-gray-400', icon: '' };
+  }
+}
+
+/**
+ * Reverse geocode lat/lng to a human-readable location name.
+ * Calls our server-side API route which proxies to OpenStreetMap Nominatim.
+ * Results are cached in-memory to avoid duplicate API calls.
+ */
+const geocodeCache = new Map<string, string>();
+
+export async function reverseGeocode(lat: number, lng: number): Promise<string> {
+  // Round to ~111m precision to cache nearby coords together
+  const key = `${lat.toFixed(3)},${lng.toFixed(3)}`;
+  const cached = geocodeCache.get(key);
+  if (cached) return cached;
+
+  try {
+    const res = await fetch(`/api/geocode?lat=${lat}&lng=${lng}`);
+    if (!res.ok) throw new Error('Geocode failed');
+    const data = await res.json();
+    const label = data.location || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    geocodeCache.set(key, label);
+    return label;
+  } catch {
+    const fallback = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    geocodeCache.set(key, fallback);
+    return fallback;
   }
 }
 

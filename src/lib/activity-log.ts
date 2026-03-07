@@ -13,22 +13,38 @@ export type ActivityAction =
     | 'schedule_created'
     | 'schedule_deleted'
     | 'task_created'
+    | 'task_updated'
     | 'task_deleted'
+    | 'task_assigned'
+    | 'task_bulk_assigned'
+    | 'task_bulk_deleted'
+    | 'task_instance_status_updated'
+    | 'task_instance_deleted'
+    | 'task_instances_bulk_deleted'
+    | 'task_media_auto_deleted'
+    | 'recurring_tasks_created'
+    | 'task_deadline_reminder_sent'
+    | 'task_completed'
+    | 'task_submission_updated'
+    | 'tasks_loaded'
+    | 'tasks_load_failed'
     | 'event_created'
     | 'event_deleted'
     | 'policy_created'
     | 'policy_deleted'
+    | 'attendance_time_edited'
 
 export type EntityType =
     | 'employee'
     | 'schedule'
     | 'task'
+    | 'task_instance'
     | 'event'
     | 'policy'
     | 'attendance'
 
 export interface ActivityLogEntry {
-    adminId: string
+    adminId: string | null
     adminEmail: string
     action: ActivityAction
     entityType: EntityType
@@ -61,7 +77,7 @@ export async function logActivity(entry: ActivityLogEntry): Promise<void> {
         const adminClient = getAdminClient()
 
         const { error } = await adminClient.from('activity_logs').insert({
-            admin_id: entry.adminId,
+            admin_id: entry.adminId || null,
             admin_email: entry.adminEmail,
             action: entry.action,
             entity_type: entry.entityType,
@@ -109,11 +125,26 @@ export function formatAction(action: ActivityAction): string {
         schedule_created: 'Created schedule',
         schedule_deleted: 'Deleted schedule',
         task_created: 'Created task',
+        task_updated: 'Updated task',
         task_deleted: 'Deleted task',
+        task_assigned: 'Assigned task',
+        task_bulk_assigned: 'Bulk assigned tasks',
+        task_bulk_deleted: 'Bulk deleted tasks',
+        task_instance_status_updated: 'Changed task status',
+        task_instance_deleted: 'Deleted task instance',
+        task_instances_bulk_deleted: 'Bulk deleted task instances',
+        task_media_auto_deleted: 'Auto-deleted task media (72h)',
+        recurring_tasks_created: 'Created recurring task instances',
+        task_deadline_reminder_sent: 'Sent task deadline reminder',
+        task_completed: 'Completed task',
+        task_submission_updated: 'Updated task submission',
+        tasks_loaded: 'Loaded tasks',
+        tasks_load_failed: 'Failed to load tasks',
         event_created: 'Created event',
         event_deleted: 'Deleted event',
         policy_created: 'Created policy',
         policy_deleted: 'Deleted policy',
+        attendance_time_edited: 'Edited attendance time',
     }
     return actionLabels[action] || action
 }

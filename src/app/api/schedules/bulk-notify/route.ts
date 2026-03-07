@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { sendBulkSchedulesCreatedNotification } from '@/lib/email'
 import { sendBulkSchedulesCreatedSMS } from '@/lib/sms'
-import { formatDate, formatTimeString } from '@/lib/utils'
+import { formatDateOnly, formatTimeString } from '@/lib/utils'
 
 interface BulkNotifyRequest {
   employeeId: string
@@ -59,8 +59,8 @@ export async function POST(request: NextRequest) {
     const result = await sendBulkSchedulesCreatedNotification({
       employeeName,
       scheduleCount,
-      startDate: formatDate(startDate),
-      endDate: formatDate(endDate),
+      startDate: formatDateOnly(startDate),
+      endDate: formatDateOnly(endDate),
       days,
       startTime: formatTimeString(startTime),
       endTime: formatTimeString(endTime),
@@ -71,8 +71,8 @@ export async function POST(request: NextRequest) {
     sendBulkSchedulesCreatedSMS({
       employeeName,
       scheduleCount,
-      startDate: formatDate(startDate),
-      endDate: formatDate(endDate),
+      startDate: formatDateOnly(startDate),
+      endDate: formatDateOnly(endDate),
     }).catch(err => console.error('Failed to send bulk schedule SMS:', err))
 
     return NextResponse.json({

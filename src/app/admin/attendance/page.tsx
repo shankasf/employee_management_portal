@@ -1,7 +1,7 @@
 'use client'
 
-import { useState, useRef } from 'react'
-import { formatHours, formatDate, formatTime, getTodayNY } from '@/lib/utils'
+import { useState, useRef, useMemo } from 'react'
+import { formatHours, formatDateOnly, formatTime, getTodayNY } from '@/lib/utils'
 import { useAttendance } from '@/lib/hooks/useData'
 
 interface AttendanceLog {
@@ -12,6 +12,8 @@ interface AttendanceLog {
     total_hours: number | null
     late_flag: boolean
     early_checkout_flag: boolean
+    actual_clock_out: string | null
+    late_clock_out_minutes: number | null
     employees: {
         id: string
         display_name: string | null
@@ -32,11 +34,18 @@ export default function AttendancePage() {
     const [dateFilter, setDateFilter] = useState<string>(getTodayNY())
     const { data: logs = [], isLoading: loading } = useAttendance(dateFilter)
     const [showExportMenu, setShowExportMenu] = useState(false)
+    const [statusFilter, setStatusFilter] = useState<'all' | 'clocked_in' | 'completed'>('all')
     const tableRef = useRef<HTMLDivElement>(null)
 
     const currentlyClockedIn = logs.filter((log: AttendanceLog) => !log.clock_out)
     const completedShifts = logs.filter((log: AttendanceLog) => log.clock_out)
     const totalHours = completedShifts.reduce((sum: number, log: AttendanceLog) => sum + (log.total_hours || 0), 0)
+
+    const filteredLogs = useMemo(() => {
+        if (statusFilter === 'clocked_in') return currentlyClockedIn
+        if (statusFilter === 'completed') return completedShifts
+        return logs
+    }, [logs, statusFilter, currentlyClockedIn, completedShifts])
 
     function exportToPDF() {
         setShowExportMenu(false)
@@ -47,7 +56,7 @@ export default function AttendancePage() {
             return
         }
 
-        const dateStr = formatDate(dateFilter)
+        const dateStr = formatDateOnly(dateFilter)
 
         printWindow.document.write(`
             <!DOCTYPE html>
@@ -116,8 +125,9 @@ export default function AttendancePage() {
                                 <td><span class="badge ${log.clock_out ? 'badge-success' : 'badge-default'}">${log.clock_out ? 'Completed' : 'Working'}</span></td>
                                 <td>
                                     ${log.late_flag ? '<span class="badge badge-warning">Late</span> ' : ''}
-                                    ${log.early_checkout_flag ? '<span class="badge badge-warning">Early Out</span>' : ''}
-                                    ${!log.late_flag && !log.early_checkout_flag ? '-' : ''}
+                                    ${log.early_checkout_flag ? '<span class="badge badge-warning">Early Out</span> ' : ''}
+                                    ${log.late_clock_out_minutes ? `<span class="badge badge-warning">Late Out (${log.late_clock_out_minutes}m)</span>` : ''}
+                                    ${!log.late_flag && !log.early_checkout_flag && !log.late_clock_out_minutes ? '-' : ''}
                                 </td>
                             </tr>
                         `).join('')}
@@ -141,16 +151,18 @@ export default function AttendancePage() {
         setShowExportMenu(false)
 
         // Create CSV content
-        const headers = ['Employee', 'Position', 'Clock In', 'Clock Out', 'Hours', 'Status', 'Late', 'Early Out']
+        const headers = ['Employee', 'Position', 'Clock In', 'Clock Out', 'Actual Clock Out', 'Hours', 'Status', 'Late', 'Early Out', 'Late Out (min)']
         const rows = logs.map((log: AttendanceLog) => [
             log.employees?.display_name || 'Unknown',
             log.employees?.position || '',
             formatTime(log.clock_in),
             log.clock_out ? formatTime(log.clock_out) : '',
+            log.actual_clock_out ? formatTime(log.actual_clock_out) : '',
             log.total_hours ? log.total_hours.toFixed(2) : '',
             log.clock_out ? 'Completed' : 'Working',
             log.late_flag ? 'Yes' : 'No',
-            log.early_checkout_flag ? 'Yes' : 'No'
+            log.early_checkout_flag ? 'Yes' : 'No',
+            log.late_clock_out_minutes ? log.late_clock_out_minutes.toString() : ''
         ])
 
         // Add summary row
@@ -192,7 +204,7 @@ export default function AttendancePage() {
                     <input
                         type="date"
                         value={dateFilter}
-                        onChange={(e) => setDateFilter(e.target.value)}
+                        onChange={(e) => { setDateFilter(e.target.value); setStatusFilter('all'); }}
                         className="input flex-1 sm:flex-none sm:w-auto"
                     />
                     <div className="relative">
@@ -245,7 +257,10 @@ export default function AttendancePage() {
 
             {/* Summary Cards */}
             <div className="grid grid-cols-3 gap-2 sm:gap-4">
-                <div className="card p-3 sm:p-4">
+                <button
+                    onClick={() => setStatusFilter(statusFilter === 'clocked_in' ? 'all' : 'clocked_in')}
+                    className={`card p-3 sm:p-4 text-left transition-all cursor-pointer ${statusFilter === 'clocked_in' ? 'ring-2 ring-green-500 bg-green-50 dark:bg-green-950/20' : 'hover:bg-muted/50'}`}
+                >
                     <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                             <p className="text-xs sm:text-sm text-muted-foreground truncate">Clocked In</p>
@@ -253,8 +268,11 @@ export default function AttendancePage() {
                         </div>
                         <span className="text-lg sm:text-2xl flex-shrink-0">🟢</span>
                     </div>
-                </div>
-                <div className="card p-3 sm:p-4">
+                </button>
+                <button
+                    onClick={() => setStatusFilter(statusFilter === 'completed' ? 'all' : 'completed')}
+                    className={`card p-3 sm:p-4 text-left transition-all cursor-pointer ${statusFilter === 'completed' ? 'ring-2 ring-blue-500 bg-blue-50 dark:bg-blue-950/20' : 'hover:bg-muted/50'}`}
+                >
                     <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                             <p className="text-xs sm:text-sm text-muted-foreground truncate">Completed</p>
@@ -262,7 +280,7 @@ export default function AttendancePage() {
                         </div>
                         <span className="text-lg sm:text-2xl flex-shrink-0">✅</span>
                     </div>
-                </div>
+                </button>
                 <div className="card p-3 sm:p-4">
                     <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
@@ -276,21 +294,47 @@ export default function AttendancePage() {
                 </div>
             </div>
 
+            {statusFilter !== 'all' && (
+                <div className="flex items-center gap-2 text-sm">
+                    <span className="text-muted-foreground">
+                        Showing: <span className="font-medium text-foreground">{statusFilter === 'clocked_in' ? 'Clocked In' : 'Completed'}</span> ({filteredLogs.length})
+                    </span>
+                    <button
+                        onClick={() => setStatusFilter('all')}
+                        className="text-primary hover:underline text-sm"
+                    >
+                        Clear filter
+                    </button>
+                </div>
+            )}
+
             {loading ? (
                 <div className="space-y-3 sm:space-y-4">
                     {[...Array(5)].map((_, i) => (
                         <div key={i} className="h-14 sm:h-16 bg-muted rounded-lg animate-pulse"></div>
                     ))}
                 </div>
-            ) : logs.length === 0 ? (
+            ) : filteredLogs.length === 0 ? (
                 <div className="card p-6 sm:p-8 text-center">
-                    <p className="text-muted-foreground text-sm sm:text-base">No attendance records for {formatDate(dateFilter)}</p>
+                    <p className="text-muted-foreground text-sm sm:text-base">
+                        {statusFilter !== 'all'
+                            ? `No ${statusFilter === 'clocked_in' ? 'clocked in' : 'completed'} records for ${formatDateOnly(dateFilter)}`
+                            : `No attendance records for ${formatDateOnly(dateFilter)}`}
+                    </p>
+                    {statusFilter !== 'all' && logs.length > 0 && (
+                        <button
+                            onClick={() => setStatusFilter('all')}
+                            className="text-primary text-sm mt-2 hover:underline"
+                        >
+                            Show all records
+                        </button>
+                    )}
                 </div>
             ) : (
                 <>
                     {/* Mobile Card View */}
                     <div className="block sm:hidden space-y-3">
-                        {logs.map((log: AttendanceLog) => (
+                        {filteredLogs.map((log: AttendanceLog) => (
                             <div key={log.id} className="card p-4">
                                 <div className="flex items-start justify-between gap-2 mb-2">
                                     <div className="min-w-0">
@@ -317,11 +361,21 @@ export default function AttendancePage() {
                                         <span className="font-medium">{log.total_hours ? formatHours(log.total_hours) : '-'}</span>
                                     </div>
                                 </div>
-                                {(log.late_flag || log.early_checkout_flag) && (
-                                    <div className="flex gap-1 mt-2">
+                                {(log.late_flag || log.early_checkout_flag || log.late_clock_out_minutes) && (
+                                    <div className="flex gap-1 mt-2 flex-wrap">
                                         {log.late_flag && <span className="badge-warning text-xs">Late</span>}
                                         {log.early_checkout_flag && <span className="badge-warning text-xs">Early Out</span>}
+                                        {log.late_clock_out_minutes && (
+                                            <span className="badge-warning text-xs" title={log.actual_clock_out ? `Actual: ${formatTime(log.actual_clock_out)}` : undefined}>
+                                                Late Out ({log.late_clock_out_minutes}m)
+                                            </span>
+                                        )}
                                     </div>
+                                )}
+                                {log.actual_clock_out && (
+                                    <p className="text-xs text-muted-foreground mt-1">
+                                        Actual out: {formatTime(log.actual_clock_out)}
+                                    </p>
                                 )}
                             </div>
                         ))}
@@ -342,7 +396,7 @@ export default function AttendancePage() {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y">
-                                    {logs.map((log: AttendanceLog) => (
+                                    {filteredLogs.map((log: AttendanceLog) => (
                                         <tr key={log.id} className="hover:bg-muted/30">
                                             <td className="p-3 sm:p-4">
                                                 <div>
@@ -353,6 +407,11 @@ export default function AttendancePage() {
                                             <td className="p-3 sm:p-4 text-sm">{formatTime(log.clock_in)}</td>
                                             <td className="p-3 sm:p-4 text-sm">
                                                 {log.clock_out ? formatTime(log.clock_out) : '-'}
+                                                {log.actual_clock_out && (
+                                                    <div className="text-xs text-muted-foreground">
+                                                        Actual: {formatTime(log.actual_clock_out)}
+                                                    </div>
+                                                )}
                                             </td>
                                             <td className="p-3 sm:p-4 text-sm">
                                                 {log.total_hours ? formatHours(log.total_hours) : '-'}
@@ -372,7 +431,12 @@ export default function AttendancePage() {
                                                     {log.early_checkout_flag && (
                                                         <span className="badge-warning text-xs">Early Out</span>
                                                     )}
-                                                    {!log.late_flag && !log.early_checkout_flag && (
+                                                    {log.late_clock_out_minutes && (
+                                                        <span className="badge-warning text-xs" title={log.actual_clock_out ? `Actual: ${formatTime(log.actual_clock_out)}` : undefined}>
+                                                            Late Out ({log.late_clock_out_minutes}m)
+                                                        </span>
+                                                    )}
+                                                    {!log.late_flag && !log.early_checkout_flag && !log.late_clock_out_minutes && (
                                                         <span className="text-muted-foreground text-sm">-</span>
                                                     )}
                                                 </div>

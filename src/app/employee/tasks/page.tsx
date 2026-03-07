@@ -3,9 +3,12 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { formatDate, formatDateTime, formatTimeString, getSignedStorageUrl } from '@/lib/utils'
+import { formatDateOnly, formatDateTime, formatTimeString, getSignedStorageUrl } from '@/lib/utils'
 import { RichTextDisplay } from '@/components/RichTextEditor'
 import { taskNotifications } from '@/lib/notifications'
+import { logValidationRejection, startUpload } from '@/lib/upload-logger'
+import { resumableUpload, shouldUseTus } from '@/lib/resumable-upload'
+import { logClientActivity } from '@/lib/client-activity-log'
 
 interface TaskInstance {
     id: string
@@ -69,16 +72,19 @@ export default function EmployeeTasksPage() {
     const [videoPreviews, setVideoPreviews] = useState<string[]>([])
     const [completing, setCompleting] = useState(false)
     const [uploadProgress, setUploadProgress] = useState<string>('')
+    const [uploadPercent, setUploadPercent] = useState<number>(0)
     const [signedPhotoUrls, setSignedPhotoUrls] = useState<string[]>([])
     const [signedVideoUrls, setSignedVideoUrls] = useState<string[]>([])
     const [signedRefImageUrls, setSignedRefImageUrls] = useState<string[]>([])
     const [signedRefVideoUrls, setSignedRefVideoUrls] = useState<string[]>([])
+    const [fullscreenVideoUrl, setFullscreenVideoUrl] = useState<string | null>(null)
     const [selectedRefImageUrls, setSelectedRefImageUrls] = useState<string[]>([])
     const [editSignedPhotoUrls, setEditSignedPhotoUrls] = useState<string[]>([])
     const [editSignedVideoUrls, setEditSignedVideoUrls] = useState<string[]>([])
     const [existingPhotoUrls, setExistingPhotoUrls] = useState<string[]>([])
     const [existingVideoUrls, setExistingVideoUrls] = useState<string[]>([])
 
+    const uploadAbortRef = useRef<(() => void) | null>(null)
     const photoInputRef = useRef<HTMLInputElement>(null)
     const videoInputRef = useRef<HTMLInputElement>(null)
     const videoRecordRef = useRef<HTMLInputElement>(null)
@@ -128,8 +134,26 @@ export default function EmployeeTasksPage() {
             const { data, error } = await query
             if (error) throw error
             setTasks(data || [])
+            logClientActivity({
+                action: 'tasks_loaded',
+                entityType: 'task_instance',
+                details: {
+                    count: data?.length ?? 0,
+                    statuses: {
+                        pending: (data || []).filter((t: TaskInstance) => t.status === 'pending').length,
+                        completed: (data || []).filter((t: TaskInstance) => t.status === 'completed').length,
+                    },
+                },
+            })
         } catch (err) {
             console.error('Error loading tasks:', err)
+            logClientActivity({
+                action: 'tasks_load_failed',
+                entityType: 'task_instance',
+                details: {
+                    error: String(err),
+                },
+            })
         } finally {
             setLoading(false)
         }
@@ -137,6 +161,15 @@ export default function EmployeeTasksPage() {
 
     useEffect(() => {
         loadTasks()
+    }, [loadTasks])
+
+    // Re-fetch tasks when window regains focus (e.g. employee switches back to the app)
+    useEffect(() => {
+        function onFocus() {
+            loadTasks()
+        }
+        window.addEventListener('focus', onFocus)
+        return () => window.removeEventListener('focus', onFocus)
     }, [loadTasks])
 
     // Handle photo file selection (multiple)
@@ -149,7 +182,14 @@ export default function EmployeeTasksPage() {
             for (let i = 0; i < files.length; i++) {
                 const file = files[i]
                 if (!file.type.startsWith('image/')) {
+                    logValidationRejection(file, 'Not an image file', 'employee_task_photo', 'task-media')
                     alert(`${file.name} is not an image file`)
+                    continue
+                }
+                // 100GB limit - matches storage bucket config
+                if (file.size > 100 * 1024 * 1024 * 1024) {
+                    logValidationRejection(file, 'File exceeds 100GB limit', 'employee_task_photo', 'task-media')
+                    alert(`${file.name} must be less than 100GB`)
                     continue
                 }
                 newFiles.push(file)
@@ -159,6 +199,8 @@ export default function EmployeeTasksPage() {
             setPhotoFiles(prev => [...prev, ...newFiles])
             setPhotoPreviews(prev => [...prev, ...newPreviews])
         }
+        // Reset input so selecting the same file or re-capturing triggers onChange
+        if (photoInputRef.current) photoInputRef.current.value = ''
     }
 
     // Remove a photo from the selection
@@ -179,7 +221,9 @@ export default function EmployeeTasksPage() {
         setEditSignedPhotoUrls(prev => prev.filter((_, i) => i !== index))
     }
 
-    // Handle video file selection
+    // Known video extensions for fallback when file.type is empty (common on Android)
+    const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'webm', 'avi', 'mpeg', 'mpg', '3gp', '3g2', 'mkv', 'm4v'])
+
     // Handle video file selection (multiple)
     function handleVideoChange(e: React.ChangeEvent<HTMLInputElement>) {
         const files = e.target.files
@@ -189,8 +233,18 @@ export default function EmployeeTasksPage() {
 
             for (let i = 0; i < files.length; i++) {
                 const file = files[i]
-                if (!file.type.startsWith('video/')) {
+                // Check MIME type first; fall back to extension for Android devices that report empty type
+                const ext = file.name.split('.').pop()?.toLowerCase() || ''
+                const isVideo = file.type.startsWith('video/') || (!file.type && VIDEO_EXTENSIONS.has(ext))
+                if (!isVideo) {
+                    logValidationRejection(file, 'Not a video file', 'employee_task_video', 'task-media')
                     alert(`${file.name} is not a video file`)
+                    continue
+                }
+                // 100GB limit - matches storage bucket config
+                if (file.size > 100 * 1024 * 1024 * 1024) {
+                    logValidationRejection(file, 'File exceeds 100GB limit', 'employee_task_video', 'task-media')
+                    alert(`${file.name} must be less than 100GB`)
                     continue
                 }
                 newFiles.push(file)
@@ -200,6 +254,9 @@ export default function EmployeeTasksPage() {
             setVideoFiles(prev => [...prev, ...newFiles])
             setVideoPreviews(prev => [...prev, ...newPreviews])
         }
+        // Reset input so recording/selecting the same file again triggers onChange
+        if (videoRecordRef.current) videoRecordRef.current.value = ''
+        if (videoInputRef.current) videoInputRef.current.value = ''
     }
 
     // Remove a video from the new uploads
@@ -217,18 +274,20 @@ export default function EmployeeTasksPage() {
         setEditSignedVideoUrls(prev => prev.filter((_, i) => i !== index))
     }
 
-    // Upload multiple videos
-    async function uploadVideos(files: File[], taskId: string): Promise<string[]> {
+    // Upload multiple videos - returns both successful URLs and failure count
+    async function uploadVideos(files: File[], taskId: string): Promise<{ urls: string[]; failed: number }> {
         const uploadedUrls: string[] = []
+        let failed = 0
         for (let i = 0; i < files.length; i++) {
             try {
                 const url = await uploadFile(files[i], 'video', taskId, i)
                 if (url) uploadedUrls.push(url)
             } catch (err) {
-                console.warn(`Video ${i + 1} upload failed:`, err)
+                failed++
+                console.error(`Video ${i + 1} upload failed:`, err)
             }
         }
-        return uploadedUrls
+        return { urls: uploadedUrls, failed }
     }
 
     // Upload file to Supabase storage
@@ -237,7 +296,9 @@ export default function EmployeeTasksPage() {
             console.error('Cannot upload: user not authenticated')
             throw new Error('User not authenticated')
         }
-        const supabase = createUntypedClient()
+        const uploadContext = type === 'photo' ? 'employee_task_photo' : 'employee_task_video' as const
+        const tracker = startUpload(file, 'task-media', uploadContext, taskId)
+
         const fileExt = file.name.split('.').pop()
         const indexStr = index !== undefined ? `_${index}` : ''
         const fileName = `${taskId}_${type}${indexStr}_${Date.now()}.${fileExt}`
@@ -246,6 +307,41 @@ export default function EmployeeTasksPage() {
 
         setUploadProgress(`Uploading ${type}${index !== undefined ? ` ${index + 1}` : ''}...`)
 
+        if (shouldUseTus(file)) {
+            // Use TUS resumable upload for large videos
+            const label = `${type}${index !== undefined ? ` ${index + 1}` : ''}`
+            const { promise, abort } = resumableUpload({
+                bucketName: 'task-media',
+                objectName: filePath,
+                file,
+                onProgress(pct) {
+                    setUploadPercent(pct)
+                    setUploadProgress(`Uploading ${label}... ${pct}%`)
+                },
+                onOffline(pct) {
+                    setUploadProgress(`No internet. ${pct}% uploaded. Will resume when back online.`)
+                },
+                onOnline(pct) {
+                    setUploadProgress(`Reconnected. Resuming upload... ${pct}%`)
+                },
+            })
+            uploadAbortRef.current = abort
+
+            try {
+                await promise
+                uploadAbortRef.current = null
+                tracker.success(filePath)
+                return filePath
+            } catch (err) {
+                uploadAbortRef.current = null
+                tracker.failure(err)
+                console.error(`Error uploading ${type}:`, err)
+                throw err
+            }
+        }
+
+        // Standard upload for small files
+        const supabase = createUntypedClient()
         const { error: uploadError } = await supabase.storage
             .from('task-media')
             .upload(filePath, file, {
@@ -254,32 +350,31 @@ export default function EmployeeTasksPage() {
             })
 
         if (uploadError) {
+            tracker.failure(uploadError)
             console.error(`Error uploading ${type}:`, uploadError)
-            // If bucket doesn't exist, try to continue without upload
-            if (uploadError.message?.includes('Bucket not found')) {
-                console.warn('Storage bucket not configured - skipping upload')
-                return null
-            }
             throw uploadError
         }
 
+        tracker.success(filePath)
         // Return the file path instead of public URL since bucket is private
         // We'll generate signed URLs when displaying
         return filePath
     }
 
-    // Upload multiple photos
-    async function uploadPhotos(files: File[], taskId: string): Promise<string[]> {
+    // Upload multiple photos - returns both successful URLs and failure count
+    async function uploadPhotos(files: File[], taskId: string): Promise<{ urls: string[]; failed: number }> {
         const uploadedUrls: string[] = []
+        let failed = 0
         for (let i = 0; i < files.length; i++) {
             try {
                 const url = await uploadFile(files[i], 'photo', taskId, i)
                 if (url) uploadedUrls.push(url)
             } catch (err) {
-                console.warn(`Photo ${i + 1} upload failed:`, err)
+                failed++
+                console.error(`Photo ${i + 1} upload failed:`, err)
             }
         }
-        return uploadedUrls
+        return { urls: uploadedUrls, failed }
     }
 
     function resetForm() {
@@ -293,6 +388,7 @@ export default function EmployeeTasksPage() {
         setVideoFiles([])
         setVideoPreviews([])
         setUploadProgress('')
+        setUploadPercent(0)
         setExistingPhotoUrls([])
         setEditSignedPhotoUrls([])
         setExistingVideoUrls([])
@@ -308,6 +404,7 @@ export default function EmployeeTasksPage() {
                 const photoUrls: string[] = []
                 if (viewingTask.photo_urls && viewingTask.photo_urls.length > 0) {
                     for (const url of viewingTask.photo_urls) {
+                        if (stale) return
                         const signed = await getSignedStorageUrl(url)
                         if (signed) photoUrls.push(signed)
                     }
@@ -322,6 +419,7 @@ export default function EmployeeTasksPage() {
                 const videoUrls: string[] = []
                 if (viewingTask.video_urls && viewingTask.video_urls.length > 0) {
                     for (const url of viewingTask.video_urls) {
+                        if (stale) return
                         const signed = await getSignedStorageUrl(url)
                         if (signed) videoUrls.push(signed)
                     }
@@ -336,6 +434,7 @@ export default function EmployeeTasksPage() {
                 const refImageUrls: string[] = []
                 if (viewingTask.tasks?.reference_images && viewingTask.tasks.reference_images.length > 0) {
                     for (const url of viewingTask.tasks.reference_images) {
+                        if (stale) return
                         const signed = await getSignedStorageUrl(url)
                         if (signed) refImageUrls.push(signed)
                     }
@@ -347,6 +446,7 @@ export default function EmployeeTasksPage() {
                 const refVideoUrls: string[] = []
                 if (viewingTask.tasks?.reference_videos && viewingTask.tasks.reference_videos.length > 0) {
                     for (const url of viewingTask.tasks.reference_videos) {
+                        if (stale) return
                         const signed = await getSignedStorageUrl(url)
                         if (signed) refVideoUrls.push(signed)
                     }
@@ -445,20 +545,36 @@ export default function EmployeeTasksPage() {
         try {
             // Combine existing photos with new uploads
             let photoUrls: string[] = [...existingPhotoUrls]
+            let photosFailed = 0
 
             // Upload new photos if provided
             if (photoFiles.length > 0) {
-                const newPhotoUrls = await uploadPhotos(photoFiles, taskInstance.id)
-                photoUrls = [...photoUrls, ...newPhotoUrls]
+                const result = await uploadPhotos(photoFiles, taskInstance.id)
+                photoUrls = [...photoUrls, ...result.urls]
+                photosFailed = result.failed
             }
 
             // Combine existing videos with new uploads
             let videoUrls: string[] = [...existingVideoUrls]
+            let videosFailed = 0
 
             // Upload new videos if provided
             if (videoFiles.length > 0) {
-                const newVideoUrls = await uploadVideos(videoFiles, taskInstance.id)
-                videoUrls = [...videoUrls, ...newVideoUrls]
+                const result = await uploadVideos(videoFiles, taskInstance.id)
+                videoUrls = [...videoUrls, ...result.urls]
+                videosFailed = result.failed
+            }
+
+            // Block save if required photos are now empty due to failures
+            if (taskInstance.tasks?.requires_photo && photoUrls.length === 0) {
+                alert(`All photo uploads failed. At least one photo is required. Please try again.`)
+                return
+            }
+
+            // Block save if required videos are now empty due to failures
+            if (taskInstance.tasks?.requires_video && videoUrls.length === 0) {
+                alert(`All video uploads failed. At least one video is required. Please try again.`)
+                return
             }
 
             setUploadProgress('Saving changes...')
@@ -476,10 +592,37 @@ export default function EmployeeTasksPage() {
                 .eq('id', taskInstance.id)
 
             if (error) throw error
+
+            logClientActivity({
+                action: 'task_submission_updated',
+                entityType: 'task_instance',
+                entityId: taskInstance.id,
+                entityName: taskInstance.tasks?.title,
+                details: {
+                    task_id: taskInstance.task_id,
+                    scheduled_date: taskInstance.scheduled_date,
+                    photo_count: photoUrls.length,
+                    video_count: videoUrls.length,
+                },
+            })
+
             await loadTasks()
             setEditingTask(null)
             resetForm()
-            alert('Submission updated successfully!')
+
+            // Warn if some (but not all) uploads failed
+            const warnings: string[] = []
+            if (photosFailed > 0) {
+                warnings.push(`${photosFailed} of ${photoFiles.length} new photo(s) failed to upload`)
+            }
+            if (videosFailed > 0) {
+                warnings.push(`${videosFailed} of ${videoFiles.length} new video(s) failed to upload`)
+            }
+            if (warnings.length > 0) {
+                alert(`Submission updated, but with issues:\n${warnings.join('\n')}\n\nYou can edit again to re-upload the failed files.`)
+            } else {
+                alert('Submission updated successfully!')
+            }
         } catch (err) {
             console.error('Error updating submission:', err)
             alert('Failed to update submission')
@@ -514,15 +657,33 @@ export default function EmployeeTasksPage() {
         try {
             let photoUrls: string[] = []
             let videoUrls: string[] = []
+            let photosFailed = 0
+            let videosFailed = 0
 
             // Upload photos if provided
             if (photoFiles.length > 0) {
-                photoUrls = await uploadPhotos(photoFiles, taskInstance.id)
+                const result = await uploadPhotos(photoFiles, taskInstance.id)
+                photoUrls = result.urls
+                photosFailed = result.failed
             }
 
             // Upload videos if provided
             if (videoFiles.length > 0) {
-                videoUrls = await uploadVideos(videoFiles, taskInstance.id)
+                const result = await uploadVideos(videoFiles, taskInstance.id)
+                videoUrls = result.urls
+                videosFailed = result.failed
+            }
+
+            // Block completion if ALL required photos failed
+            if (taskInstance.tasks?.requires_photo && photoFiles.length > 0 && photoUrls.length === 0) {
+                alert(`All ${photosFailed} photo(s) failed to upload. Please try again. If the problem persists, try using a different image format (JPG or PNG).`)
+                return
+            }
+
+            // Block completion if ALL required videos failed
+            if (taskInstance.tasks?.requires_video && videoFiles.length > 0 && videoUrls.length === 0) {
+                alert(`All ${videosFailed} video(s) failed to upload. Please try again. If the problem persists, try converting the video to MP4 format.`)
+                return
             }
 
             setUploadProgress('Saving task...')
@@ -546,10 +707,37 @@ export default function EmployeeTasksPage() {
             // Send email notification to managers (non-blocking)
             taskNotifications.completed(taskInstance.id, notes || undefined).catch(console.error)
 
+            logClientActivity({
+                action: 'task_completed',
+                entityType: 'task_instance',
+                entityId: taskInstance.id,
+                entityName: taskInstance.tasks?.title,
+                details: {
+                    task_id: taskInstance.task_id,
+                    scheduled_date: taskInstance.scheduled_date,
+                    photo_count: photoUrls.length,
+                    video_count: videoUrls.length,
+                    has_notes: !!notes,
+                },
+            })
+
             await loadTasks()
             setSelectedTask(null)
             resetForm()
-            alert('Task completed successfully!')
+
+            // Warn if some (but not all) uploads failed
+            const warnings: string[] = []
+            if (photosFailed > 0 && photoUrls.length > 0) {
+                warnings.push(`${photosFailed} of ${photoFiles.length} photo(s) failed to upload`)
+            }
+            if (videosFailed > 0 && videoUrls.length > 0) {
+                warnings.push(`${videosFailed} of ${videoFiles.length} video(s) failed to upload`)
+            }
+            if (warnings.length > 0) {
+                alert(`Task completed, but with issues:\n${warnings.join('\n')}\n\nYou can edit your submission to re-upload the failed files.`)
+            } else {
+                alert('Task completed successfully!')
+            }
         } catch (err) {
             console.error('Error completing task:', err)
             alert('Failed to complete task')
@@ -647,6 +835,13 @@ export default function EmployeeTasksPage() {
                         View and complete your assigned tasks
                     </p>
                 </div>
+                <button
+                    onClick={() => loadTasks()}
+                    className="btn-outline btn-sm flex items-center gap-2"
+                    disabled={loading}
+                >
+                    {loading ? 'Refreshing...' : 'Refresh'}
+                </button>
             </div>
 
             {/* Summary - Clickable Cards */}
@@ -885,7 +1080,7 @@ export default function EmployeeTasksPage() {
                                                 <p className="text-sm text-muted-foreground mt-1 line-clamp-2">{task.tasks.description.replace(/<[^>]*>/g, ' ').replace(/&[^;]+;/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)}</p>
                                             )}
                                             <div className="flex flex-wrap gap-2 mt-2 text-xs text-muted-foreground">
-                                                <span>📅 {formatDate(task.scheduled_date)}</span>
+                                                <span>📅 {formatDateOnly(task.scheduled_date)}</span>
                                                 {task.tasks?.location && (
                                                     <span>📍 {task.tasks.location}</span>
                                                 )}
@@ -931,7 +1126,7 @@ export default function EmployeeTasksPage() {
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
                     <div
                         className="absolute inset-0 bg-black/50"
-                        onClick={() => setSelectedTask(null)}
+                        onClick={() => { setSelectedTask(null); resetForm() }}
                     ></div>
                     <div className="relative card w-full max-w-md max-h-[90vh] overflow-y-auto">
                         <div className="card-header">
@@ -944,9 +1139,6 @@ export default function EmployeeTasksPage() {
                                 <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3">
                                     <p className="text-sm font-medium text-blue-800 dark:text-blue-200 mb-2">
                                         🖼️ Reference Images ({selectedRefImageUrls.length})
-                                    </p>
-                                    <p className="text-xs text-blue-600 dark:text-blue-300 mb-2">
-                                        Examples of what the completed task should look like
                                     </p>
                                     <div className="grid grid-cols-3 gap-2">
                                         {selectedRefImageUrls.map((url, index) => (
@@ -1130,8 +1322,31 @@ export default function EmployeeTasksPage() {
                             </div>
 
                             {uploadProgress && (
-                                <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-sm text-blue-800 dark:text-blue-200 text-center">
-                                    ⏳ {uploadProgress}
+                                <div className={`p-3 rounded-lg text-sm ${uploadProgress.includes('No internet') ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200' : uploadProgress.includes('Reconnected') ? 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200' : 'bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-200'}`}>
+                                    <div className="flex items-center justify-between mb-1">
+                                        <span className="flex-1 text-center">{uploadProgress.includes('No internet') ? '📡' : '⏳'} {uploadProgress}</span>
+                                        {uploadAbortRef.current && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    uploadAbortRef.current?.()
+                                                    uploadAbortRef.current = null
+                                                    setUploadProgress('')
+                                                    setUploadPercent(0)
+                                                    setCompleting(false)
+                                                }}
+                                                className="ml-2 px-2 py-0.5 text-xs rounded bg-red-500 text-white hover:bg-red-600"
+                                            >
+                                                Cancel
+                                            </button>
+                                        )}
+                                    </div>
+                                    {uploadPercent > 0 && (
+                                        <div className={`w-full rounded-full h-2 ${uploadProgress.includes('No internet') ? 'bg-red-200 dark:bg-red-800' : 'bg-blue-200 dark:bg-blue-800'}`}>
+                                            <div className={`h-2 rounded-full transition-all duration-300 ${uploadProgress.includes('No internet') ? 'bg-red-500 dark:bg-red-400' : 'bg-blue-600 dark:bg-blue-400'}`}
+                                                 style={{ width: `${uploadPercent}%` }} />
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -1195,7 +1410,7 @@ export default function EmployeeTasksPage() {
                             <div className="grid grid-cols-2 gap-4 text-sm">
                                 <div className="bg-muted/30 rounded-lg p-3">
                                     <p className="text-muted-foreground text-xs">Scheduled Date</p>
-                                    <p className="font-medium">📅 {formatDate(viewingTask.scheduled_date)}</p>
+                                    <p className="font-medium">📅 {formatDateOnly(viewingTask.scheduled_date)}</p>
                                 </div>
                                 {viewingTask.tasks?.location && (
                                     <div className="bg-muted/30 rounded-lg p-3">
@@ -1205,7 +1420,7 @@ export default function EmployeeTasksPage() {
                                 )}
                                 {viewingTask.tasks?.cutoff_time && (
                                     <div className="bg-muted/30 rounded-lg p-3">
-                                        <p className="text-muted-foreground text-xs">Due Time</p>
+                                        <p className="text-muted-foreground text-xs">Deadline</p>
                                         <p className="font-medium">⏰ {formatTimeString(viewingTask.tasks.cutoff_time)}</p>
                                     </div>
                                 )}
@@ -1239,9 +1454,6 @@ export default function EmployeeTasksPage() {
                                     <p className="text-sm font-medium text-muted-foreground mb-2">
                                         🖼️ Reference Images ({signedRefImageUrls.length})
                                     </p>
-                                    <p className="text-xs text-muted-foreground mb-2">
-                                        Examples showing what the completed task should look like
-                                    </p>
                                     <div className="grid grid-cols-2 gap-2">
                                         {signedRefImageUrls.map((url, index) => (
                                             <a
@@ -1269,25 +1481,30 @@ export default function EmployeeTasksPage() {
                                     <p className="text-sm font-medium text-muted-foreground mb-2">
                                         🎥 Reference Videos ({signedRefVideoUrls.length})
                                     </p>
-                                    <p className="text-xs text-muted-foreground mb-2">
-                                        Example videos showing how to complete the task
-                                    </p>
                                     <div className="space-y-2">
                                         {signedRefVideoUrls.map((url, index) => (
-                                            <video
-                                                key={index}
-                                                src={`${url}#t=0.1`}
-                                                className="w-full max-h-48 rounded-lg border"
-                                                preload="metadata"
-                                                controls
-                                            />
+                                            <div key={index} className="relative group">
+                                                <video
+                                                    src={`${url}#t=0.1`}
+                                                    className="w-full max-h-48 rounded-lg border"
+                                                    preload="metadata"
+                                                    controls
+                                                />
+                                                <button
+                                                    onClick={() => setFullscreenVideoUrl(url)}
+                                                    className="absolute top-2 right-2 bg-black/60 hover:bg-black/80 text-white rounded-lg p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                    title="View fullscreen"
+                                                >
+                                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                                                </button>
+                                            </div>
                                         ))}
                                     </div>
                                 </div>
                             )}
 
                             {/* Employee Submission Section */}
-                            {(viewingTask.notes || signedPhotoUrls.length > 0 || viewingTask.video_url) && (
+                            {(viewingTask.notes || signedPhotoUrls.length > 0 || viewingTask.video_urls?.length || viewingTask.video_url) && (
                                 <div className="border-t pt-4">
                                     <p className="text-sm font-semibold mb-3">Your Submission</p>
                                 </div>
@@ -1339,13 +1556,21 @@ export default function EmployeeTasksPage() {
                                     {signedVideoUrls.length > 0 ? (
                                         <div className="space-y-2">
                                             {signedVideoUrls.map((url, index) => (
-                                                <video
-                                                    key={index}
-                                                    src={`${url}#t=0.1`}
-                                                    className="w-full max-h-64 rounded-lg border"
-                                                    preload="metadata"
-                                                    controls
-                                                />
+                                                <div key={index} className="relative group">
+                                                    <video
+                                                        src={`${url}#t=0.1`}
+                                                        className="w-full max-h-64 rounded-lg border"
+                                                        preload="metadata"
+                                                        controls
+                                                    />
+                                                    <button
+                                                        onClick={() => setFullscreenVideoUrl(url)}
+                                                        className="absolute top-2 right-2 bg-black/60 hover:bg-black/80 text-white rounded-lg p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                        title="View fullscreen"
+                                                    >
+                                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                                                    </button>
+                                                </div>
                                             ))}
                                         </div>
                                     ) : (
@@ -1591,8 +1816,31 @@ export default function EmployeeTasksPage() {
                             </div>
 
                             {uploadProgress && (
-                                <div className="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg text-sm text-blue-800 dark:text-blue-200 text-center">
-                                    ⏳ {uploadProgress}
+                                <div className={`p-3 rounded-lg text-sm ${uploadProgress.includes('No internet') ? 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200' : uploadProgress.includes('Reconnected') ? 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200' : 'bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-200'}`}>
+                                    <div className="flex items-center justify-between mb-1">
+                                        <span className="flex-1 text-center">{uploadProgress.includes('No internet') ? '📡' : '⏳'} {uploadProgress}</span>
+                                        {uploadAbortRef.current && (
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    uploadAbortRef.current?.()
+                                                    uploadAbortRef.current = null
+                                                    setUploadProgress('')
+                                                    setUploadPercent(0)
+                                                    setCompleting(false)
+                                                }}
+                                                className="ml-2 px-2 py-0.5 text-xs rounded bg-red-500 text-white hover:bg-red-600"
+                                            >
+                                                Cancel
+                                            </button>
+                                        )}
+                                    </div>
+                                    {uploadPercent > 0 && (
+                                        <div className={`w-full rounded-full h-2 ${uploadProgress.includes('No internet') ? 'bg-red-200 dark:bg-red-800' : 'bg-blue-200 dark:bg-blue-800'}`}>
+                                            <div className={`h-2 rounded-full transition-all duration-300 ${uploadProgress.includes('No internet') ? 'bg-red-500 dark:bg-red-400' : 'bg-blue-600 dark:bg-blue-400'}`}
+                                                 style={{ width: `${uploadPercent}%` }} />
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -1616,6 +1864,25 @@ export default function EmployeeTasksPage() {
                             </button>
                         </div>
                     </div>
+                </div>
+            )}
+
+            {/* Fullscreen Video Overlay */}
+            {fullscreenVideoUrl && (
+                <div className="fixed inset-0 z-[200] bg-black flex items-center justify-center" onClick={() => setFullscreenVideoUrl(null)}>
+                    <button
+                        onClick={() => setFullscreenVideoUrl(null)}
+                        className="absolute top-4 right-4 text-white bg-white/20 hover:bg-white/30 rounded-full p-2 z-10"
+                    >
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                    <video
+                        src={fullscreenVideoUrl}
+                        controls
+                        autoPlay
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ maxWidth: '100vw', maxHeight: '100vh' }}
+                    />
                 </div>
             )}
         </div>

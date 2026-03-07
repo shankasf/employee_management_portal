@@ -1,8 +1,8 @@
-// Device fingerprinting utility for clock-in verification
-// Generates a unique device ID that persists in localStorage
+// Device detection utility for clock-in verification
+// Detects device model name and combines with userId for a stable, unique device ID
 
-const DEVICE_ID_KEY = 'playfunia_device_id';
 const DEVICE_NAME_KEY = 'playfunia_device_name';
+const DEVICE_SEEN_KEY = 'playfunia_device_seen';
 
 export interface DeviceInfo {
   deviceId: string;
@@ -11,51 +11,86 @@ export interface DeviceInfo {
 }
 
 /**
- * Generate a unique device fingerprint based on browser characteristics
- * This creates a hash of stable browser properties
+ * Detect the device model name.
+ *
+ * - Android (Chrome/Edge/Samsung Internet): Uses Client Hints API for actual hardware model
+ * - Android (older browsers): Parses UA string, skipping Chrome UA-reduction placeholder "K"
+ * - iOS: Maps screen dimensions + DPR to a readable string (Apple hides the model)
+ * - Desktop: Detects from UA string
  */
-function generateDeviceFingerprint(): string {
-  if (typeof window === 'undefined') {
-    return 'server-side';
+async function detectDeviceModel(): Promise<string> {
+  if (typeof navigator === 'undefined') {
+    return 'Unknown Device';
   }
 
-  const components: string[] = [];
-
-  // Screen properties
-  components.push(`screen:${screen.width}x${screen.height}x${screen.colorDepth}`);
-
-  // Timezone
-  components.push(`tz:${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
-
-  // Language
-  components.push(`lang:${navigator.language}`);
-
-  // Platform
-  components.push(`platform:${navigator.platform}`);
-
-  // Hardware concurrency (number of CPU cores)
-  if (navigator.hardwareConcurrency) {
-    components.push(`cores:${navigator.hardwareConcurrency}`);
-  }
-
-  // Device memory (if available)
-  if ('deviceMemory' in navigator) {
-    components.push(`mem:${(navigator as Navigator & { deviceMemory?: number }).deviceMemory}`);
-  }
-
-  // Touch support
-  components.push(`touch:${navigator.maxTouchPoints || 0}`);
-
-  // User agent (partial - just browser info)
   const ua = navigator.userAgent;
-  const browserMatch = ua.match(/(Chrome|Firefox|Safari|Edge|Opera)\/[\d.]+/);
-  if (browserMatch) {
-    components.push(`browser:${browserMatch[0]}`);
+
+  // --- Android: try Client Hints API first (returns real hardware model) ---
+  if (/Android/.test(ua)) {
+    // navigator.userAgentData is available on Chromium-based browsers
+    const uaData = (navigator as NavigatorWithUAData).userAgentData;
+    if (uaData?.getHighEntropyValues) {
+      try {
+        const hints = await uaData.getHighEntropyValues(['model']);
+        if (hints.model && hints.model !== '' && hints.model !== 'K') {
+          return hints.model;
+        }
+      } catch {
+        // getHighEntropyValues can throw — fall through to UA parsing
+      }
+    }
+
+    // Fallback: parse UA string for older Android browsers
+    const match = ua.match(/Android.*?;\s*([^;)]+)/);
+    if (match && match[1]) {
+      const model = match[1].trim().replace(/Build\/.*/, '').trim();
+      // Chrome UA reduction uses "K" as a placeholder — skip it
+      if (model && model !== 'K') {
+        return model;
+      }
+    }
+
+    return 'Android Device';
   }
 
-  // Create a hash from all components
-  const fingerprint = components.join('|');
-  return hashString(fingerprint);
+  // --- iOS: screen dimensions + DPR (Apple hides the model in UA) ---
+  if (/iPhone/.test(ua)) {
+    const w = screen.width;
+    const h = screen.height;
+    const dpr = window.devicePixelRatio || 1;
+    return `iPhone (${w}x${h}@${dpr}x)`;
+  }
+  if (/iPad/.test(ua)) {
+    const w = screen.width;
+    const h = screen.height;
+    const dpr = window.devicePixelRatio || 1;
+    return `iPad (${w}x${h}@${dpr}x)`;
+  }
+
+  // --- Desktop ---
+  if (/CrOS/.test(ua)) {
+    return 'Chromebook';
+  }
+  if (/Windows/.test(ua)) {
+    return 'Windows PC';
+  }
+  if (/Macintosh/.test(ua)) {
+    return 'Mac';
+  }
+  if (/Linux/.test(ua)) {
+    return 'Linux PC';
+  }
+
+  return 'Unknown Device';
+}
+
+/**
+ * Type for navigator.userAgentData (Client Hints API — not in all TS libs yet)
+ */
+interface NavigatorWithUAData extends Navigator {
+  userAgentData?: {
+    getHighEntropyValues(hints: string[]): Promise<{ model?: string }>;
+  };
 }
 
 /**
@@ -68,72 +103,24 @@ function hashString(str: string): string {
   }
   // Convert to hex and make it look like a device ID
   const hex = (hash >>> 0).toString(16).padStart(8, '0');
-  // Add a random component to make it more unique per browser instance
   return `DEV-${hex.toUpperCase()}`;
 }
 
 /**
- * Generate a random suffix to make the device ID unique even for similar browsers
+ * Generate a device fingerprint from the model name + userId.
+ * Two employees with the same phone model get different IDs.
+ * Same employee, different browser on same phone → same ID.
  */
-function generateRandomSuffix(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let result = '';
-  for (let i = 0; i < 6; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
+function generateDeviceFingerprint(deviceModel: string, userId: string): string {
+  return hashString(deviceModel + userId);
 }
 
 /**
- * Detect device name from user agent
+ * Get device info with a deterministic device ID.
+ * The ID is computed from the device model + userId, so it stays stable
+ * across browsers on the same physical device for the same employee.
  */
-function detectDeviceName(): string {
-  if (typeof navigator === 'undefined') {
-    return 'Unknown Device';
-  }
-
-  const ua = navigator.userAgent;
-
-  // Check for mobile devices first
-  if (/iPhone/.test(ua)) {
-    return 'iPhone';
-  }
-  if (/iPad/.test(ua)) {
-    return 'iPad';
-  }
-  if (/Android/.test(ua)) {
-    // Try to get device model
-    const match = ua.match(/Android.*?;\s*([^;)]+)/);
-    if (match && match[1]) {
-      const model = match[1].trim();
-      // Clean up common suffixes
-      return model.replace(/Build\/.*/, '').trim() || 'Android Device';
-    }
-    return 'Android Device';
-  }
-
-  // Desktop browsers
-  if (/Windows/.test(ua)) {
-    return 'Windows PC';
-  }
-  if (/Macintosh/.test(ua)) {
-    return 'Mac';
-  }
-  if (/Linux/.test(ua)) {
-    return 'Linux PC';
-  }
-  if (/CrOS/.test(ua)) {
-    return 'Chromebook';
-  }
-
-  return 'Unknown Device';
-}
-
-/**
- * Get or create a device ID
- * The device ID is stored in localStorage and persists across sessions
- */
-export function getDeviceInfo(): DeviceInfo {
+export async function getDeviceInfo(userId: string): Promise<DeviceInfo> {
   if (typeof window === 'undefined') {
     return {
       deviceId: 'server-side',
@@ -142,27 +129,22 @@ export function getDeviceInfo(): DeviceInfo {
     };
   }
 
-  // Try to get existing device ID
-  let deviceId = localStorage.getItem(DEVICE_ID_KEY);
+  // Detect the device model (async for Client Hints API)
+  const deviceModel = await detectDeviceModel();
+  const deviceId = generateDeviceFingerprint(deviceModel, userId);
+
+  // Cache device name in localStorage for display purposes
   let deviceName = localStorage.getItem(DEVICE_NAME_KEY);
-  let isNew = false;
-
-  if (!deviceId) {
-    // Generate new device ID
-    const fingerprint = generateDeviceFingerprint();
-    const suffix = generateRandomSuffix();
-    deviceId = `${fingerprint}-${suffix}`;
-    deviceName = detectDeviceName();
-
-    // Store in localStorage
-    localStorage.setItem(DEVICE_ID_KEY, deviceId);
+  if (!deviceName || deviceName !== deviceModel) {
+    deviceName = deviceModel;
     localStorage.setItem(DEVICE_NAME_KEY, deviceName);
-    isNew = true;
   }
 
-  if (!deviceName) {
-    deviceName = detectDeviceName();
-    localStorage.setItem(DEVICE_NAME_KEY, deviceName);
+  // Track whether we've seen this device before (for registration prompt UX)
+  const seen = localStorage.getItem(DEVICE_SEEN_KEY);
+  const isNew = seen !== deviceId;
+  if (isNew) {
+    localStorage.setItem(DEVICE_SEEN_KEY, deviceId);
   }
 
   return {
@@ -175,15 +157,20 @@ export function getDeviceInfo(): DeviceInfo {
 /**
  * Get just the device ID (for quick checks)
  */
-export function getDeviceId(): string {
-  return getDeviceInfo().deviceId;
+export async function getDeviceId(userId: string): Promise<string> {
+  const info = await getDeviceInfo(userId);
+  return info.deviceId;
 }
 
 /**
- * Get the device name
+ * Check if this device ID matches the registered device ID
  */
-export function getDeviceName(): string {
-  return getDeviceInfo().deviceName;
+export async function isDeviceRegistered(registeredDeviceId: string | null, userId: string): Promise<boolean> {
+  if (!registeredDeviceId) {
+    return false;
+  }
+  const currentDeviceId = await getDeviceId(userId);
+  return currentDeviceId === registeredDeviceId;
 }
 
 /**
@@ -191,20 +178,9 @@ export function getDeviceName(): string {
  */
 export function clearDeviceInfo(): void {
   if (typeof window !== 'undefined') {
-    localStorage.removeItem(DEVICE_ID_KEY);
     localStorage.removeItem(DEVICE_NAME_KEY);
+    localStorage.removeItem(DEVICE_SEEN_KEY);
   }
-}
-
-/**
- * Check if this device ID matches the registered device ID
- */
-export function isDeviceRegistered(registeredDeviceId: string | null): boolean {
-  if (!registeredDeviceId) {
-    return false;
-  }
-  const currentDeviceId = getDeviceId();
-  return currentDeviceId === registeredDeviceId;
 }
 
 /**

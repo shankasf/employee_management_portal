@@ -75,14 +75,20 @@ export default function AdminSchedulesPage() {
     })
 
     // Use SWR hook for cached, instant data loading
+    // NOTE: Don't pass status filter to the API - we filter client-side so stat card counts stay accurate
     const filters = useMemo(() => ({
         startDate: dateFilter.start,
         endDate: dateFilter.end,
-        status: statusFilter === 'all' ? undefined : statusFilter,
         employeeId: employeeFilter || undefined,
-    }), [dateFilter.start, dateFilter.end, statusFilter, employeeFilter])
+    }), [dateFilter.start, dateFilter.end, employeeFilter])
 
-    const { data: schedules = [], isLoading: loading, mutate: refreshSchedules } = useSchedules(filters)
+    const { data: allSchedules = [], isLoading: loading, mutate: refreshSchedules } = useSchedules(filters)
+
+    // Apply status filter client-side so counts always reflect the full dataset
+    const schedules = useMemo(() => {
+        if (statusFilter === 'all') return allSchedules
+        return allSchedules.filter((s: { status: string }) => s.status === statusFilter)
+    }, [allSchedules, statusFilter])
 
     const [formData, setFormData] = useState({
         employee_id: '',
@@ -125,6 +131,7 @@ export default function AdminSchedulesPage() {
         start_time: '09:00',
         end_time: '17:00',
         title: '',
+        description: '',
         location: '',
     })
     const [useCustomTimes, setUseCustomTimes] = useState(false)
@@ -195,17 +202,18 @@ export default function AdminSchedulesPage() {
             const schedules = []
 
             // Generate schedules for each day in the date range
-            // Parse dates as local dates (YYYY-MM-DD format)
+            // Parse dates with noon to avoid timezone boundary issues
             const [startYear, startMonth, startDay] = bulkFormData.start_date.split('-').map(Number)
             const [endYear, endMonth, endDay] = bulkFormData.end_date.split('-').map(Number)
-            const startDate = new Date(startYear, startMonth - 1, startDay)
-            const endDate = new Date(endYear, endMonth - 1, endDay)
+            const startDate = new Date(startYear, startMonth - 1, startDay, 12, 0, 0)
+            const endDate = new Date(endYear, endMonth - 1, endDay, 12, 0, 0)
 
             const currentDate = new Date(startDate)
+            const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
             while (currentDate <= endDate) {
-                const dayName = currentDate.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase()
+                const dayName = WEEKDAYS[currentDate.getDay()]
                 if (bulkFormData.days.includes(dayName)) {
-                    // Format date as YYYY-MM-DD using local date components
+                    // Format date as YYYY-MM-DD using local date components (noon avoids boundary issues)
                     const year = currentDate.getFullYear()
                     const month = String(currentDate.getMonth() + 1).padStart(2, '0')
                     const day = String(currentDate.getDate()).padStart(2, '0')
@@ -222,6 +230,7 @@ export default function AdminSchedulesPage() {
                         start_time: times.start_time,
                         end_time: times.end_time,
                         title: bulkFormData.title || null,
+                        description: bulkFormData.description || null,
                         location: bulkFormData.location || null,
                         status: 'pending',
                         created_by: user.id,
@@ -267,6 +276,7 @@ export default function AdminSchedulesPage() {
                 start_time: '09:00',
                 end_time: '17:00',
                 title: '',
+                description: '',
                 location: '',
             })
             setUseCustomTimes(false)
@@ -362,8 +372,13 @@ export default function AdminSchedulesPage() {
         }
     }
 
-    const pendingCount = schedules.filter((s: { status: string }) => s.status === 'pending').length
-    const cancellationRequestedCount = schedules.filter((s: { status: string }) => s.status === 'cancellation_requested').length
+    const pendingCount = allSchedules.filter((s: { status: string }) => s.status === 'pending').length
+    const confirmedCount = allSchedules.filter((s: { status: string }) => s.status === 'confirmed').length
+    const cancellationRequestedCount = allSchedules.filter((s: { status: string }) => s.status === 'cancellation_requested').length
+    const cancelledCount = allSchedules.filter((s: { status: string }) => s.status === 'cancelled' || s.status === 'completed').length
+
+    const totalCardLabel = 'Total Schedules'
+    const totalCardCount = allSchedules.length
 
     // Get selected employee for shift info display
     const selectedEmployee = formData.employee_id
@@ -518,36 +533,43 @@ export default function AdminSchedulesPage() {
             </div>
 
             {/* Stats Cards - clickable to filter */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 sm:gap-4">
                 <button
                     className={`card p-3 sm:p-4 text-left cursor-pointer transition-all ${statusFilter === 'all' ? 'ring-2 ring-primary' : 'hover:ring-1 hover:ring-muted-foreground/30'}`}
                     onClick={() => setStatusFilter('all')}
                 >
-                    <p className="text-xs sm:text-sm text-muted-foreground">Total Schedules</p>
-                    <p className="text-xl sm:text-2xl font-bold">{schedules.length}</p>
+                    <p className="text-xs sm:text-sm text-muted-foreground">{totalCardLabel}</p>
+                    <p className="text-xl sm:text-2xl font-bold">{totalCardCount}</p>
                 </button>
                 <button
                     className={`card p-3 sm:p-4 text-left cursor-pointer transition-all ${statusFilter === 'pending' ? 'ring-2 ring-yellow-500' : 'hover:ring-1 hover:ring-muted-foreground/30'}`}
                     onClick={() => setStatusFilter(statusFilter === 'pending' ? 'all' : 'pending')}
                 >
-                    <p className="text-xs sm:text-sm text-muted-foreground">Pending Confirmation</p>
+                    <p className="text-xs sm:text-sm text-muted-foreground">Pending Schedules</p>
                     <p className="text-xl sm:text-2xl font-bold text-yellow-600">{pendingCount}</p>
                 </button>
                 <button
                     className={`card p-3 sm:p-4 text-left cursor-pointer transition-all ${statusFilter === 'cancellation_requested' ? 'ring-2 ring-red-500' : 'hover:ring-1 hover:ring-muted-foreground/30'}`}
                     onClick={() => setStatusFilter(statusFilter === 'cancellation_requested' ? 'all' : 'cancellation_requested')}
                 >
-                    <p className="text-xs sm:text-sm text-muted-foreground">Cancel Requests</p>
+                    <p className="text-xs sm:text-sm text-muted-foreground">Cancel Request Schedules</p>
                     <p className="text-xl sm:text-2xl font-bold text-red-600">{cancellationRequestedCount}</p>
                 </button>
                 <button
                     className={`card p-3 sm:p-4 text-left cursor-pointer transition-all ${statusFilter === 'confirmed' ? 'ring-2 ring-green-500' : 'hover:ring-1 hover:ring-muted-foreground/30'}`}
                     onClick={() => setStatusFilter(statusFilter === 'confirmed' ? 'all' : 'confirmed')}
                 >
-                    <p className="text-xs sm:text-sm text-muted-foreground">Confirmed</p>
+                    <p className="text-xs sm:text-sm text-muted-foreground">Confirmed Schedules</p>
                     <p className="text-xl sm:text-2xl font-bold text-green-600">
-                        {schedules.filter((s: { status: string }) => s.status === 'confirmed').length}
+                        {confirmedCount}
                     </p>
+                </button>
+                <button
+                    className={`card p-3 sm:p-4 text-left cursor-pointer transition-all ${statusFilter === 'cancelled' ? 'ring-2 ring-gray-500' : 'hover:ring-1 hover:ring-muted-foreground/30'}`}
+                    onClick={() => setStatusFilter(statusFilter === 'cancelled' ? 'all' : 'cancelled')}
+                >
+                    <p className="text-xs sm:text-sm text-muted-foreground">Cancelled Schedules</p>
+                    <p className="text-xl sm:text-2xl font-bold text-gray-600">{cancelledCount}</p>
                 </button>
             </div>
 
@@ -976,6 +998,15 @@ export default function AdminSchedulesPage() {
                                         placeholder="e.g., Regular Shift"
                                         value={bulkFormData.title}
                                         onChange={(e) => setBulkFormData({ ...bulkFormData, title: e.target.value })}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="label">Description</label>
+                                    <RichTextEditor
+                                        value={bulkFormData.description}
+                                        onChange={(value) => setBulkFormData({ ...bulkFormData, description: value })}
+                                        placeholder="Enter schedule description..."
+                                        minHeight="80px"
                                     />
                                 </div>
                                 <div>

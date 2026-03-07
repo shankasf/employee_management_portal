@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { formatDate, formatTime } from '@/lib/utils'
+import { formatDate, formatTime, toNYDateTimeString, nyDateTimeToUTC } from '@/lib/utils'
 import { useAuth } from '@/contexts/AuthContext'
 import { useEvents, useActiveEmployees, invalidateQueries } from '@/lib/hooks/useData'
 import { eventNotifications } from '@/lib/notifications'
@@ -65,8 +65,8 @@ export default function EventsPage() {
             setEditingEvent(event)
             setFormData({
                 title: event.title,
-                start_time: event.start_time.slice(0, 16),
-                end_time: event.end_time.slice(0, 16),
+                start_time: toNYDateTimeString(new Date(event.start_time)),
+                end_time: toNYDateTimeString(new Date(event.end_time)),
                 room: event.room || '',
                 expected_headcount: event.expected_headcount?.toString() || '',
                 notes: event.notes || ''
@@ -74,16 +74,8 @@ export default function EventsPage() {
         } else {
             setEditingEvent(null)
             const now = new Date()
-            const toLocalDateTimeString = (d: Date) => {
-                const y = d.getFullYear()
-                const mo = String(d.getMonth() + 1).padStart(2, '0')
-                const da = String(d.getDate()).padStart(2, '0')
-                const h = String(d.getHours()).padStart(2, '0')
-                const mi = String(d.getMinutes()).padStart(2, '0')
-                return `${y}-${mo}-${da}T${h}:${mi}`
-            }
-            const defaultStart = toLocalDateTimeString(new Date(now.getTime() + 60 * 60 * 1000))
-            const defaultEnd = toLocalDateTimeString(new Date(now.getTime() + 3 * 60 * 60 * 1000))
+            const defaultStart = toNYDateTimeString(new Date(now.getTime() + 60 * 60 * 1000))
+            const defaultEnd = toNYDateTimeString(new Date(now.getTime() + 3 * 60 * 60 * 1000))
             setFormData({
                 title: '',
                 start_time: defaultStart,
@@ -130,8 +122,8 @@ export default function EventsPage() {
 
             const eventData = {
                 title: formData.title,
-                start_time: formData.start_time,
-                end_time: formData.end_time,
+                start_time: nyDateTimeToUTC(formData.start_time),
+                end_time: nyDateTimeToUTC(formData.end_time),
                 room: formData.room || null,
                 expected_headcount: formData.expected_headcount ? parseInt(formData.expected_headcount) : null,
                 notes: formData.notes || null,

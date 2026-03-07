@@ -3,10 +3,13 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { useAuth } from '@/contexts/AuthContext'
-import { useTasks, useActiveEmployees, useTaskInstances, invalidateQueries } from '@/lib/hooks/useData'
+import { useTasks, useAssignableUsers, useTaskInstances, invalidateQueries } from '@/lib/hooks/useData'
 import { taskNotifications } from '@/lib/notifications'
 import { getTodayNY, getDateNY, formatScheduleDate, formatDateTime, formatTimeString, getSignedStorageUrl } from '@/lib/utils'
 import { RichTextEditor, RichTextDisplay } from '@/components/RichTextEditor'
+import { logValidationRejection, startUpload } from '@/lib/upload-logger'
+import { resumableUpload, shouldUseTus } from '@/lib/resumable-upload'
+import { logClientActivity } from '@/lib/client-activity-log'
 
 interface Task {
     id: string
@@ -29,6 +32,7 @@ interface ActiveEmployee {
     id: string
     display_name: string | null
     position: string | null
+    is_admin?: boolean
 }
 
 interface TaskInstance {
@@ -43,6 +47,9 @@ interface TaskInstance {
     photo_urls: string[] | null
     video_url: string | null
     video_urls: string[] | null
+    media_deleted_at: string | null
+    media_deleted_by: string | null
+    media_deleted_by_name: string | null
     created_at: string
     tasks: {
         id: string
@@ -72,7 +79,7 @@ interface TaskInstance {
 export default function TasksPage() {
     const { user } = useAuth()
     const { data: tasks = [], isLoading: loading, mutate } = useTasks()
-    const { data: employees = [] } = useActiveEmployees()
+    const { data: employees = [] } = useAssignableUsers()
     const [showModal, setShowModal] = useState(false)
     const [showAssignModal, setShowAssignModal] = useState(false)
     const [showDetailModal, setShowDetailModal] = useState(false)
@@ -81,6 +88,7 @@ export default function TasksPage() {
     const [signedVideoUrls, setSignedVideoUrls] = useState<string[]>([])
     const [signedRefImageUrls, setSignedRefImageUrls] = useState<string[]>([])
     const [signedRefVideoUrls, setSignedRefVideoUrls] = useState<string[]>([])
+    const [fullscreenVideoUrl, setFullscreenVideoUrl] = useState<string | null>(null)
     const [editingTask, setEditingTask] = useState<Task | null>(null)
     const [assigningTask, setAssigningTask] = useState<Task | null>(null)
     const [viewingTask, setViewingTask] = useState<Task | null>(null)
@@ -90,11 +98,15 @@ export default function TasksPage() {
     const [saving, setSaving] = useState(false)
     const [activeTab, setActiveTab] = useState<'definitions' | 'assigned'>('assigned')
 
+    // Bulk selection for assigned task instances
+    const [selectedInstanceIds, setSelectedInstanceIds] = useState<Set<string>>(new Set())
+    const [deletingInstances, setDeletingInstances] = useState(false)
+
     // Multi-select for bulk operations
     const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set())
     const [showBulkAssignModal, setShowBulkAssignModal] = useState(false)
     const [bulkAssignData, setBulkAssignData] = useState({
-        employee_id: '',
+        employee_ids: [] as string[],
         scheduled_date: getTodayNY()
     })
 
@@ -111,7 +123,13 @@ export default function TasksPage() {
     const [existingRefVideos, setExistingRefVideos] = useState<string[]>([])
     const [existingRefVideoUrls, setExistingRefVideoUrls] = useState<string[]>([])
     const [videoUploadProgress, setVideoUploadProgress] = useState<string>('')
+    const [videoUploadPercent, setVideoUploadPercent] = useState<number>(0)
     const refVideoInputRef = useRef<HTMLInputElement>(null)
+
+    // Dual scrollbar refs for assigned tasks table
+    const topScrollRef = useRef<HTMLDivElement>(null)
+    const bottomScrollRef = useRef<HTMLDivElement>(null)
+    const scrollSourceRef = useRef<'top' | 'bottom' | null>(null)
 
     // Filters for assigned tasks table
     const [filters, setFilters] = useState({
@@ -262,13 +280,13 @@ export default function TasksPage() {
         requires_notes: false,
         // Optional immediate assignment
         assign_now: false,
-        employee_id: '',
+        employee_ids: [] as string[],
         scheduled_date: getTodayNY()
     })
 
     // Assignment form state
     const [assignData, setAssignData] = useState({
-        employee_id: '',
+        employee_ids: [] as string[],
         scheduled_date: getTodayNY()
     })
 
@@ -302,7 +320,7 @@ export default function TasksPage() {
                 requires_video: task.requires_video,
                 requires_notes: task.requires_notes,
                 assign_now: false,
-                employee_id: '',
+                employee_ids: [] as string[],
                 scheduled_date: getTodayNY()
             })
             // Load existing reference images
@@ -339,7 +357,7 @@ export default function TasksPage() {
                 requires_video: false,
                 requires_notes: false,
                 assign_now: false,
-                employee_id: '',
+                employee_ids: [] as string[],
                 scheduled_date: getTodayNY()
             })
         }
@@ -372,11 +390,14 @@ export default function TasksPage() {
             for (let i = 0; i < files.length; i++) {
                 const file = files[i]
                 if (!file.type.startsWith('image/')) {
+                    logValidationRejection(file, 'Not an image file', 'admin_ref_image', 'task-media')
                     alert(`${file.name} is not an image file`)
                     continue
                 }
-                if (file.size > 10 * 1024 * 1024) {
-                    alert(`${file.name} must be less than 10MB`)
+                // 100GB limit - matches storage bucket config
+                if (file.size > 100 * 1024 * 1024 * 1024) {
+                    logValidationRejection(file, 'File exceeds 100GB limit', 'admin_ref_image', 'task-media')
+                    alert(`${file.name} must be less than 100GB`)
                     continue
                 }
                 newFiles.push(file)
@@ -410,6 +431,7 @@ export default function TasksPage() {
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i]
+            const tracker = startUpload(file, 'task-media', 'admin_ref_image', taskId)
             const fileExt = file.name.split('.').pop()
             const fileName = `task_${taskId}_ref_${i}_${Date.now()}.${fileExt}`
             const filePath = `task-references/${taskId}/${fileName}`
@@ -419,8 +441,10 @@ export default function TasksPage() {
                 .upload(filePath, file, { cacheControl: '3600', upsert: false })
 
             if (!error) {
+                tracker.success(filePath)
                 uploadedUrls.push(filePath)
             } else {
+                tracker.failure(error)
                 console.warn(`Failed to upload reference image ${i}:`, error)
             }
         }
@@ -429,6 +453,9 @@ export default function TasksPage() {
     }
 
     // Handle reference video selection
+    // Known video extensions for fallback when file.type is empty (common on Android)
+    const VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'webm', 'avi', 'mpeg', 'mpg', '3gp', '3g2', 'mkv', 'm4v'])
+
     function handleRefVideoChange(e: React.ChangeEvent<HTMLInputElement>) {
         const files = e.target.files
         if (files && files.length > 0) {
@@ -437,13 +464,18 @@ export default function TasksPage() {
 
             for (let i = 0; i < files.length; i++) {
                 const file = files[i]
-                if (!file.type.startsWith('video/')) {
+                // Check MIME type first; fall back to extension for Android devices that report empty type
+                const ext = file.name.split('.').pop()?.toLowerCase() || ''
+                const isVideo = file.type.startsWith('video/') || (!file.type && VIDEO_EXTENSIONS.has(ext))
+                if (!isVideo) {
+                    logValidationRejection(file, 'Not a video file', 'admin_ref_video', 'task-media')
                     alert(`${file.name} is not a video file`)
                     continue
                 }
-                // 10GB limit
-                if (file.size > 10 * 1024 * 1024 * 1024) {
-                    alert(`${file.name} must be less than 10GB`)
+                // 100GB limit - matches storage bucket config
+                if (file.size > 100 * 1024 * 1024 * 1024) {
+                    logValidationRejection(file, 'File exceeds 100GB limit', 'admin_ref_video', 'task-media')
+                    alert(`${file.name} must be less than 100GB`)
                     continue
                 }
                 newFiles.push(file)
@@ -485,25 +517,61 @@ export default function TasksPage() {
 
         for (let i = 0; i < files.length; i++) {
             const file = files[i]
+            const tracker = startUpload(file, 'task-media', 'admin_ref_video', taskId)
             const fileExt = file.name.split('.').pop()
             const fileName = `task_${taskId}_video_${i}_${Date.now()}.${fileExt}`
             const filePath = `task-references/${taskId}/${fileName}`
 
             setVideoUploadProgress(`Uploading video ${i + 1}/${files.length}: ${file.name} (${formatFileSize(file.size)})...`)
+            setVideoUploadPercent(0)
 
-            const { error } = await supabase.storage
-                .from('task-media')
-                .upload(filePath, file, { cacheControl: '3600', upsert: false })
+            if (shouldUseTus(file)) {
+                // Use TUS resumable upload for large videos
+                const label = `video ${i + 1}/${files.length}: ${file.name} (${formatFileSize(file.size)})`
+                const { promise } = resumableUpload({
+                    bucketName: 'task-media',
+                    objectName: filePath,
+                    file,
+                    onProgress(pct) {
+                        setVideoUploadPercent(pct)
+                        setVideoUploadProgress(`Uploading ${label}... ${pct}%`)
+                    },
+                    onOffline(pct) {
+                        setVideoUploadProgress(`No internet. ${pct}% uploaded. Will resume when back online.`)
+                    },
+                    onOnline(pct) {
+                        setVideoUploadProgress(`Reconnected. Resuming upload... ${pct}%`)
+                    },
+                })
 
-            if (!error) {
-                uploadedUrls.push(filePath)
+                try {
+                    await promise
+                    tracker.success(filePath)
+                    uploadedUrls.push(filePath)
+                } catch (err) {
+                    tracker.failure(err)
+                    console.warn(`Failed to upload reference video ${i}:`, err)
+                    alert(`Failed to upload ${file.name}. Please try again.`)
+                }
             } else {
-                console.warn(`Failed to upload reference video ${i}:`, error)
-                alert(`Failed to upload ${file.name}: ${error.message}`)
+                // Standard upload for small videos
+                const { error } = await supabase.storage
+                    .from('task-media')
+                    .upload(filePath, file, { cacheControl: '3600', upsert: false })
+
+                if (!error) {
+                    tracker.success(filePath)
+                    uploadedUrls.push(filePath)
+                } else {
+                    tracker.failure(error)
+                    console.warn(`Failed to upload reference video ${i}:`, error)
+                    alert(`Failed to upload ${file.name}. Please try again.`)
+                }
             }
         }
 
         setVideoUploadProgress('')
+        setVideoUploadPercent(0)
         return uploadedUrls
     }
 
@@ -544,7 +612,7 @@ export default function TasksPage() {
     function openAssignModal(task: Task) {
         setAssigningTask(task)
         setAssignData({
-            employee_id: '',
+            employee_ids: [],
             scheduled_date: getTodayNY()
         })
         setShowAssignModal(true)
@@ -567,6 +635,61 @@ export default function TasksPage() {
         setSignedVideoUrls([])
         setSignedRefImageUrls([])
         setSignedRefVideoUrls([])
+    }
+
+    // Bulk delete selected task instances via API
+    async function bulkDeleteInstances() {
+        const ids = Array.from(selectedInstanceIds)
+        if (ids.length === 0) return
+        if (!confirm(`Are you sure you want to delete ${ids.length} assigned task(s)? This will also remove any associated media files. This action cannot be undone.`)) return
+
+        setDeletingInstances(true)
+        try {
+            const res = await fetch('/api/admin/task-instances/bulk-delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ instanceIds: ids }),
+            })
+            const data = await res.json()
+            if (!res.ok) {
+                alert(data.error || 'Failed to delete task instances')
+                return
+            }
+            alert(`Successfully deleted ${data.deleted} assigned task(s).${data.filesRemoved > 0 ? ` ${data.filesRemoved} media file(s) also removed.` : ''}`)
+            setSelectedInstanceIds(new Set())
+            mutateInstances()
+        } catch (err) {
+            console.error('Error bulk deleting task instances:', err)
+            alert('Failed to delete assigned tasks')
+        } finally {
+            setDeletingInstances(false)
+        }
+    }
+
+    // Toggle instance selection
+    function toggleInstanceSelection(id: string) {
+        setSelectedInstanceIds(prev => {
+            const next = new Set(prev)
+            if (next.has(id)) {
+                next.delete(id)
+            } else {
+                next.add(id)
+            }
+            return next
+        })
+    }
+
+    // Select/deselect all instances
+    function toggleSelectAllInstances() {
+        if (selectedInstanceIds.size === filteredTaskInstances.length && filteredTaskInstances.length > 0) {
+            setSelectedInstanceIds(new Set())
+        } else {
+            setSelectedInstanceIds(new Set(filteredTaskInstances.map((i: TaskInstance) => i.id)))
+        }
+    }
+
+    function clearInstanceSelection() {
+        setSelectedInstanceIds(new Set())
     }
 
     // Load signed URLs when viewing an instance
@@ -633,8 +756,8 @@ export default function TasksPage() {
         e.preventDefault()
 
         // Validate assignment fields if assign_now is checked
-        if (formData.assign_now && !formData.employee_id) {
-            alert('Please select an employee to assign the task to')
+        if (formData.assign_now && formData.employee_ids.length === 0) {
+            alert('Please select at least one employee to assign the task to')
             return
         }
 
@@ -643,8 +766,24 @@ export default function TasksPage() {
             const supabase = createUntypedClient()
             let taskId: string | null = editingTask?.id || null
 
-            // For new tasks, create first to get the ID for image uploads
+            // For new tasks, check for duplicate title first, then create to get the ID for image uploads
             if (!editingTask) {
+                const { data: existingTasks } = await supabase
+                    .from('tasks')
+                    .select('id, title')
+                    .ilike('title', formData.title.trim())
+                    .limit(1)
+
+                if (existingTasks && existingTasks.length > 0) {
+                    const proceed = confirm(
+                        `A task named "${existingTasks[0].title}" already exists. Do you still want to create a new task with this name?\n\nClick Cancel to go back and use the existing task instead (via the Assign button).`
+                    )
+                    if (!proceed) {
+                        setSaving(false)
+                        return
+                    }
+                }
+
                 const { data, error } = await supabase
                     .from('tasks')
                     .insert({
@@ -715,31 +854,85 @@ export default function TasksPage() {
                 if (error) throw error
             }
 
-            // If assign_now is checked, create the task instance
-            if (formData.assign_now && taskId && formData.employee_id) {
-                const { data: instanceData, error: instanceError } = await supabase
+            // If assign_now is checked, create task instances for all selected employees
+            let assignDetails: Record<string, unknown> | null = null
+            if (formData.assign_now && taskId && formData.employee_ids.length > 0) {
+                const scheduledDate = formData.scheduled_date || getTodayNY()
+
+                // Check for existing assignments to avoid duplicates
+                const { data: existing } = await supabase
                     .from('task_instances')
-                    .insert({
+                    .select('employee_id')
+                    .eq('task_id', taskId)
+                    .eq('scheduled_date', scheduledDate)
+                    .in('employee_id', formData.employee_ids)
+
+                const alreadyAssigned = new Set((existing || []).map((e: { employee_id: string }) => e.employee_id))
+                const newEmployeeIds = formData.employee_ids.filter((id: string) => !alreadyAssigned.has(id))
+
+                if (newEmployeeIds.length > 0) {
+                    const instances = newEmployeeIds.map((empId: string) => ({
                         task_id: taskId,
-                        employee_id: formData.employee_id,
-                        scheduled_date: formData.scheduled_date,
+                        employee_id: empId,
+                        scheduled_date: scheduledDate,
                         status: 'pending'
-                    })
-                    .select()
-                    .single()
+                    }))
 
-                if (instanceError) throw instanceError
+                    const { data: instanceData, error: instanceError } = await supabase
+                        .from('task_instances')
+                        .upsert(instances, { onConflict: 'task_id,employee_id,scheduled_date', ignoreDuplicates: true })
+                        .select()
 
-                // Send notification
-                if (instanceData?.id) {
-                    taskNotifications.assigned(instanceData.id).catch(console.error)
+                    if (instanceError) throw instanceError
+
+                    // Send notification for each instance
+                    if (instanceData && instanceData.length > 0) {
+                        for (const instance of instanceData) {
+                            taskNotifications.assigned(instance.id).catch(console.error)
+                        }
+                    }
+
+                    assignDetails = {
+                        employee_ids: newEmployeeIds,
+                        employee_names: (employees as ActiveEmployee[])
+                            .filter(emp => newEmployeeIds.includes(emp.id))
+                            .map(emp => emp.display_name || emp.id),
+                        instances_created: instanceData?.length ?? 0,
+                        scheduled_date: scheduledDate,
+                        skipped: alreadyAssigned.size,
+                        skipped_names: (employees as ActiveEmployee[])
+                            .filter(emp => alreadyAssigned.has(emp.id))
+                            .map(emp => emp.display_name || emp.id),
+                    }
                 }
 
-                alert(editingTask ? 'Task updated and assigned!' : 'Task created and assigned!')
+                const count = newEmployeeIds.length
+                const skipped = alreadyAssigned.size
+                const skippedMsg = skipped > 0 ? ` (${skipped} already assigned)` : ''
+                alert(editingTask ? `Task updated and assigned to ${count} employee(s)!${skippedMsg}` : `Task created and assigned to ${count} employee(s)!${skippedMsg}`)
                 mutateInstances()
             } else {
                 alert(editingTask ? 'Task updated!' : 'Task created!')
             }
+
+            logClientActivity({
+                action: editingTask ? 'task_updated' : 'task_created',
+                entityType: 'task',
+                entityId: taskId || undefined,
+                entityName: formData.title,
+                details: editingTask
+                    ? { title: formData.title, location: formData.location || null, is_recurring: formData.is_recurring }
+                    : {
+                        title: formData.title,
+                        location: formData.location || null,
+                        requires_photo: formData.requires_photo,
+                        requires_video: formData.requires_video,
+                        requires_notes: formData.requires_notes,
+                        assigned_immediately: formData.assign_now,
+                        employee_count: formData.assign_now ? formData.employee_ids.length : 0,
+                        ...(assignDetails ? { assignment: assignDetails } : {}),
+                    },
+            })
 
             closeModal()
             invalidateQueries.tasks()
@@ -755,30 +948,75 @@ export default function TasksPage() {
 
     async function handleAssign(e: React.FormEvent) {
         e.preventDefault()
-        if (!assigningTask) return
+        if (!assigningTask || assignData.employee_ids.length === 0) return
         setSaving(true)
         try {
             const supabase = createUntypedClient()
 
+            // Check for existing assignments to avoid duplicates
+            const { data: existing } = await supabase
+                .from('task_instances')
+                .select('employee_id')
+                .eq('task_id', assigningTask.id)
+                .eq('scheduled_date', assignData.scheduled_date)
+                .in('employee_id', assignData.employee_ids)
+
+            const alreadyAssigned = new Set((existing || []).map((e: { employee_id: string }) => e.employee_id))
+            const newEmployeeIds = assignData.employee_ids.filter(id => !alreadyAssigned.has(id))
+
+            if (newEmployeeIds.length === 0) {
+                alert('All selected employee(s) are already assigned this task for this date.')
+                return
+            }
+
+            if (alreadyAssigned.size > 0) {
+                alert(`${alreadyAssigned.size} employee(s) already assigned — assigning to ${newEmployeeIds.length} remaining.`)
+            }
+
+            const instances = newEmployeeIds.map(empId => ({
+                task_id: assigningTask.id,
+                employee_id: empId,
+                scheduled_date: assignData.scheduled_date,
+                status: 'pending'
+            }))
+
             const { data, error } = await supabase
                 .from('task_instances')
-                .insert({
-                    task_id: assigningTask.id,
-                    employee_id: assignData.employee_id,
-                    scheduled_date: assignData.scheduled_date,
-                    status: 'pending'
-                })
+                .upsert(instances, { onConflict: 'task_id,employee_id,scheduled_date', ignoreDuplicates: true })
                 .select()
-                .single()
 
             if (error) throw error
 
-            // Send email notification to assigned employee (non-blocking)
-            if (data?.id) {
-                taskNotifications.assigned(data.id).catch(console.error)
+            // Send email notification to each assigned employee (non-blocking)
+            if (data && data.length > 0) {
+                for (const instance of data) {
+                    taskNotifications.assigned(instance.id).catch(console.error)
+                }
             }
 
-            alert('Task assigned successfully!')
+            const count = newEmployeeIds.length
+            const assignedNames = (employees as ActiveEmployee[])
+                .filter(emp => newEmployeeIds.includes(emp.id))
+                .map(emp => emp.display_name || emp.id)
+            const skippedNames = (employees as ActiveEmployee[])
+                .filter(emp => alreadyAssigned.has(emp.id))
+                .map(emp => emp.display_name || emp.id)
+            logClientActivity({
+                action: 'task_assigned',
+                entityType: 'task',
+                entityId: assigningTask.id,
+                entityName: assigningTask.title,
+                details: {
+                    employee_count: count,
+                    employee_ids: newEmployeeIds,
+                    employee_names: assignedNames,
+                    instances_created: data?.length ?? 0,
+                    scheduled_date: assignData.scheduled_date,
+                    skipped: alreadyAssigned.size,
+                    skipped_names: skippedNames,
+                },
+            })
+            alert(`Task assigned to ${count} employee(s)!`)
             closeAssignModal()
             mutateInstances()
         } catch (err: unknown) {
@@ -792,6 +1030,7 @@ export default function TasksPage() {
 
     async function deleteTask(id: string) {
         if (!confirm('Are you sure you want to delete this task?')) return
+        const taskInfo = (tasks as Task[]).find(t => t.id === id)
         try {
             const supabase = createUntypedClient()
             const { error } = await supabase
@@ -799,6 +1038,17 @@ export default function TasksPage() {
                 .delete()
                 .eq('id', id)
             if (error) throw error
+            logClientActivity({
+                action: 'task_deleted',
+                entityType: 'task',
+                entityId: id,
+                entityName: taskInfo?.title,
+                details: {
+                    title: taskInfo?.title,
+                    was_recurring: taskInfo?.is_recurring,
+                    location: taskInfo?.location || null,
+                },
+            })
             invalidateQueries.tasks()
             mutate()
         } catch (err) {
@@ -808,6 +1058,7 @@ export default function TasksPage() {
     }
 
     async function updateInstanceStatus(instanceId: string, newStatus: string) {
+        const instance = (taskInstances as TaskInstance[]).find(ti => ti.id === instanceId)
         try {
             const supabase = createUntypedClient()
             const updateData: Record<string, unknown> = { status: newStatus }
@@ -822,6 +1073,18 @@ export default function TasksPage() {
                 .eq('id', instanceId)
 
             if (error) throw error
+            logClientActivity({
+                action: 'task_instance_status_updated',
+                entityType: 'task_instance',
+                entityId: instanceId,
+                entityName: instance?.tasks?.title,
+                details: {
+                    new_status: newStatus,
+                    previous_status: instance?.status,
+                    employee_name: instance?.employees?.display_name,
+                    scheduled_date: instance?.scheduled_date,
+                },
+            })
             mutateInstances()
         } catch (err) {
             console.error('Error updating task status:', err)
@@ -831,6 +1094,7 @@ export default function TasksPage() {
 
     async function deleteInstance(instanceId: string) {
         if (!confirm('Are you sure you want to delete this assigned task?')) return
+        const instance = (taskInstances as TaskInstance[]).find(ti => ti.id === instanceId)
         try {
             const supabase = createUntypedClient()
             const { error } = await supabase
@@ -838,6 +1102,17 @@ export default function TasksPage() {
                 .delete()
                 .eq('id', instanceId)
             if (error) throw error
+            logClientActivity({
+                action: 'task_instance_deleted',
+                entityType: 'task_instance',
+                entityId: instanceId,
+                entityName: instance?.tasks?.title,
+                details: {
+                    employee_name: instance?.employees?.display_name,
+                    status: instance?.status,
+                    scheduled_date: instance?.scheduled_date,
+                },
+            })
             mutateInstances()
         } catch (err) {
             console.error('Error deleting task instance:', err)
@@ -874,6 +1149,10 @@ export default function TasksPage() {
         if (selectedTaskIds.size === 0) return
         if (!confirm(`Are you sure you want to delete ${selectedTaskIds.size} task(s)? This action cannot be undone.`)) return
 
+        const deletedNames = (tasks as Task[])
+            .filter(t => selectedTaskIds.has(t.id))
+            .map(t => t.title)
+
         setSaving(true)
         try {
             const supabase = createUntypedClient()
@@ -885,6 +1164,16 @@ export default function TasksPage() {
                 .in('id', ids)
 
             if (error) throw error
+
+            logClientActivity({
+                action: 'task_bulk_deleted',
+                entityType: 'task',
+                entityName: `${ids.length} tasks`,
+                details: {
+                    count: ids.length,
+                    task_names: deletedNames,
+                },
+            })
 
             alert(`Successfully deleted ${ids.length} task(s)`)
             clearSelection()
@@ -901,7 +1190,7 @@ export default function TasksPage() {
     function openBulkAssignModal() {
         if (selectedTaskIds.size === 0) return
         setBulkAssignData({
-            employee_id: '',
+            employee_ids: [],
             scheduled_date: getTodayNY()
         })
         setShowBulkAssignModal(true)
@@ -913,24 +1202,50 @@ export default function TasksPage() {
 
     async function handleBulkAssign(e: React.FormEvent) {
         e.preventDefault()
-        if (selectedTaskIds.size === 0 || !bulkAssignData.employee_id) return
+        if (selectedTaskIds.size === 0 || bulkAssignData.employee_ids.length === 0) return
 
         setSaving(true)
         try {
             const supabase = createUntypedClient()
             const taskIds = Array.from(selectedTaskIds)
 
-            // Create task instances for each selected task
-            const instances = taskIds.map(taskId => ({
-                task_id: taskId,
-                employee_id: bulkAssignData.employee_id,
-                scheduled_date: bulkAssignData.scheduled_date,
-                status: 'pending'
-            }))
+            // Check for existing assignments to avoid duplicates
+            const { data: existing } = await supabase
+                .from('task_instances')
+                .select('task_id, employee_id')
+                .in('task_id', taskIds)
+                .eq('scheduled_date', bulkAssignData.scheduled_date)
+                .in('employee_id', bulkAssignData.employee_ids)
+
+            const existingKeys = new Set(
+                (existing || []).map((e: { task_id: string; employee_id: string }) => `${e.task_id}:${e.employee_id}`)
+            )
+
+            // Create task instances for each selected task × each selected employee, excluding existing
+            const instances = taskIds.flatMap(taskId =>
+                bulkAssignData.employee_ids
+                    .filter(empId => !existingKeys.has(`${taskId}:${empId}`))
+                    .map(empId => ({
+                        task_id: taskId,
+                        employee_id: empId,
+                        scheduled_date: bulkAssignData.scheduled_date,
+                        status: 'pending'
+                    }))
+            )
+
+            if (instances.length === 0) {
+                alert('All selected task/employee combinations are already assigned for this date.')
+                return
+            }
+
+            const skipped = (taskIds.length * bulkAssignData.employee_ids.length) - instances.length
+            if (skipped > 0) {
+                alert(`${skipped} assignment(s) already exist — creating ${instances.length} new one(s).`)
+            }
 
             const { data, error } = await supabase
                 .from('task_instances')
-                .insert(instances)
+                .upsert(instances, { onConflict: 'task_id,employee_id,scheduled_date', ignoreDuplicates: true })
                 .select()
 
             if (error) throw error
@@ -942,7 +1257,30 @@ export default function TasksPage() {
                 }
             }
 
-            alert(`Successfully assigned ${taskIds.length} task(s)`)
+            const bulkAssignedNames = (employees as ActiveEmployee[])
+                .filter(emp => bulkAssignData.employee_ids.includes(emp.id))
+                .map(emp => emp.display_name || emp.id)
+            const bulkTaskNames = (tasks as Task[])
+                .filter(t => taskIds.includes(t.id))
+                .map(t => t.title)
+            logClientActivity({
+                action: 'task_bulk_assigned',
+                entityType: 'task',
+                entityName: `${taskIds.length} tasks`,
+                details: {
+                    task_count: taskIds.length,
+                    task_names: bulkTaskNames,
+                    employee_count: bulkAssignData.employee_ids.length,
+                    employee_ids: bulkAssignData.employee_ids,
+                    employee_names: bulkAssignedNames,
+                    instances_requested: instances.length,
+                    instances_created: data?.length ?? 0,
+                    skipped: skipped,
+                    scheduled_date: bulkAssignData.scheduled_date,
+                },
+            })
+
+            alert(`Assigned ${taskIds.length} task(s) to ${bulkAssignData.employee_ids.length} employee(s)!`)
             closeBulkAssignModal()
             clearSelection()
             mutateInstances()
@@ -982,7 +1320,8 @@ export default function TasksPage() {
             // Filter by submission status
             if (filters.hasSubmission !== 'all') {
                 const hasPhotos = instance.photo_url || (instance.photo_urls && instance.photo_urls.length > 0)
-                const hasAnySubmission = instance.notes || hasPhotos || instance.video_url
+                const hasVideos = instance.video_url || (instance.video_urls && instance.video_urls.length > 0)
+                const hasAnySubmission = instance.notes || hasPhotos || hasVideos
                 switch (filters.hasSubmission) {
                     case 'with':
                         if (!hasAnySubmission) return false
@@ -994,7 +1333,7 @@ export default function TasksPage() {
                         if (!hasPhotos) return false
                         break
                     case 'video':
-                        if (!instance.video_url) return false
+                        if (!hasVideos) return false
                         break
                     case 'notes':
                         if (!instance.notes) return false
@@ -1004,6 +1343,37 @@ export default function TasksPage() {
             return true
         })
     }, [taskInstances, filters.status, filters.taskId, filters.location, filters.hasSubmission])
+
+    // Sync dual scrollbars (top + bottom) for assigned tasks table
+    useEffect(() => {
+        const top = topScrollRef.current
+        const bottom = bottomScrollRef.current
+        if (!top || !bottom) return
+
+        function onTopScroll() {
+            if (scrollSourceRef.current === 'bottom') return
+            scrollSourceRef.current = 'top'
+            if (bottomScrollRef.current) {
+                bottomScrollRef.current.scrollLeft = topScrollRef.current!.scrollLeft
+            }
+            requestAnimationFrame(() => { scrollSourceRef.current = null })
+        }
+        function onBottomScroll() {
+            if (scrollSourceRef.current === 'top') return
+            scrollSourceRef.current = 'bottom'
+            if (topScrollRef.current) {
+                topScrollRef.current.scrollLeft = bottomScrollRef.current!.scrollLeft
+            }
+            requestAnimationFrame(() => { scrollSourceRef.current = null })
+        }
+
+        top.addEventListener('scroll', onTopScroll)
+        bottom.addEventListener('scroll', onBottomScroll)
+        return () => {
+            top.removeEventListener('scroll', onTopScroll)
+            bottom.removeEventListener('scroll', onBottomScroll)
+        }
+    }, [activeTab, filteredTaskInstances.length])
 
     return (
         <div className="space-y-4 sm:space-y-6">
@@ -1071,16 +1441,16 @@ export default function TasksPage() {
                             </select>
                         </div>
                         <div className="flex-1">
-                            <label className="label">Employee</label>
+                            <label className="label">Assignee</label>
                             <select
                                 className="input"
                                 value={filters.employeeId}
                                 onChange={(e) => setFilters({ ...filters, employeeId: e.target.value })}
                             >
-                                <option value="all">All Employees</option>
+                                <option value="all">All Assignees</option>
                                 {employees.map((emp: ActiveEmployee) => (
                                     <option key={emp.id} value={emp.id}>
-                                        {emp.display_name || 'Unnamed'}
+                                        {emp.display_name || 'Unnamed'}{emp.is_admin ? ' (Admin)' : ''}
                                     </option>
                                 ))}
                             </select>
@@ -1238,16 +1608,57 @@ export default function TasksPage() {
                         </div>
                     ) : (
                         <div className="card overflow-hidden">
+                            {/* Bulk actions bar */}
+                            {selectedInstanceIds.size > 0 && (
+                                <div className="px-4 py-3 bg-primary/5 border-b border-primary/20 flex flex-wrap items-center justify-between gap-3">
+                                    <div className="flex items-center gap-3">
+                                        <span className="text-sm font-medium">
+                                            {selectedInstanceIds.size} task{selectedInstanceIds.size > 1 ? 's' : ''} selected
+                                        </span>
+                                        <button
+                                            className="text-sm text-primary hover:underline"
+                                            onClick={clearInstanceSelection}
+                                        >
+                                            Clear selection
+                                        </button>
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-red-700 bg-red-50 border border-red-200 rounded-md hover:bg-red-100 hover:border-red-300 transition-colors disabled:opacity-50"
+                                            onClick={bulkDeleteInstances}
+                                            disabled={deletingInstances}
+                                        >
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                            </svg>
+                                            {deletingInstances ? 'Deleting...' : `Delete Tasks (${selectedInstanceIds.size})`}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                             {/* Results count */}
                             {filteredTaskInstances.length !== taskInstances.length && (
                                 <div className="px-4 py-2 bg-muted/50 border-b text-sm text-muted-foreground">
                                     Showing {filteredTaskInstances.length} of {taskInstances.length} tasks
                                 </div>
                             )}
-                            <div className="scrollbar-visible">
+                            {/* Top scrollbar - synced with bottom */}
+                            <div ref={topScrollRef} className="scrollbar-visible border-b" style={{ marginBottom: -1 }}>
+                                <div style={{ width: '1100px', height: 1 }} />
+                            </div>
+                            <div ref={bottomScrollRef} className="scrollbar-visible">
                                 <table className="w-full text-sm" style={{ minWidth: '1100px' }}>
                                     <thead className="bg-muted/50">
                                         <tr>
+                                            <th className="p-3 w-8" onClick={(e) => e.stopPropagation()}>
+                                                <input
+                                                    type="checkbox"
+                                                    className="rounded border-gray-300 cursor-pointer"
+                                                    checked={selectedInstanceIds.size === filteredTaskInstances.length && filteredTaskInstances.length > 0}
+                                                    onChange={toggleSelectAllInstances}
+                                                    title="Select all"
+                                                />
+                                            </th>
                                             <th className="text-left p-3 font-medium whitespace-nowrap">Task</th>
                                             <th className="text-left p-3 font-medium whitespace-nowrap">Employee</th>
                                             <th className="text-center p-3 font-medium whitespace-nowrap">Recurring</th>
@@ -1264,9 +1675,17 @@ export default function TasksPage() {
                                         {filteredTaskInstances.map((instance: TaskInstance) => (
                                             <tr
                                                 key={instance.id}
-                                                className="hover:bg-muted/30 cursor-pointer transition-colors"
+                                                className={`hover:bg-muted/30 cursor-pointer transition-colors ${selectedInstanceIds.has(instance.id) ? 'bg-primary/5' : ''}`}
                                                 onClick={() => openDetailModal(instance)}
                                             >
+                                                <td className="p-3" onClick={(e) => e.stopPropagation()}>
+                                                    <input
+                                                        type="checkbox"
+                                                        className="rounded border-gray-300 cursor-pointer"
+                                                        checked={selectedInstanceIds.has(instance.id)}
+                                                        onChange={() => toggleInstanceSelection(instance.id)}
+                                                    />
+                                                </td>
                                                 <td className="p-3">
                                                     <div className="font-medium flex items-center gap-2">
                                                         {instance.tasks?.title || 'Unknown Task'}
@@ -1559,7 +1978,7 @@ export default function TasksPage() {
                                                 <th className="text-left p-3 text-xs font-medium text-muted-foreground">Task Title</th>
                                                 <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden sm:table-cell">Role</th>
                                                 <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden md:table-cell">Location</th>
-                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden lg:table-cell">Cutoff</th>
+                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden lg:table-cell">Deadline</th>
                                                 <th className="text-center p-3 text-xs font-medium text-muted-foreground">Requirements</th>
                                                 <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden lg:table-cell">Created</th>
                                                 <th className="text-right p-3 text-xs font-medium text-muted-foreground">Actions</th>
@@ -1685,24 +2104,47 @@ export default function TasksPage() {
                         <div className="p-6">
                             <h2 className="text-xl font-bold mb-2">Assign Tasks</h2>
                             <p className="text-muted-foreground mb-4">
-                                Assign {selectedTaskIds.size} task{selectedTaskIds.size > 1 ? 's' : ''} to an employee
+                                Assign {selectedTaskIds.size} task{selectedTaskIds.size > 1 ? 's' : ''} to employee(s)
                             </p>
                             <form onSubmit={handleBulkAssign} className="space-y-4">
                                 <div>
-                                    <label className="label">Employee *</label>
-                                    <select
-                                        required
-                                        className="input"
-                                        value={bulkAssignData.employee_id}
-                                        onChange={(e) => setBulkAssignData({ ...bulkAssignData, employee_id: e.target.value })}
-                                    >
-                                        <option value="">Select an employee</option>
-                                        {employees.map((emp: ActiveEmployee) => (
-                                            <option key={emp.id} value={emp.id}>
-                                                {emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}
-                                            </option>
-                                        ))}
-                                    </select>
+                                    <label className="label">Employees * ({bulkAssignData.employee_ids.length} selected)</label>
+                                    <div className="border rounded-md">
+                                        <label className="flex items-center gap-2 px-3 py-2 border-b bg-muted/30 cursor-pointer hover:bg-muted/50">
+                                            <input
+                                                type="checkbox"
+                                                className="rounded border-gray-300"
+                                                checked={employees.length > 0 && bulkAssignData.employee_ids.length === employees.length}
+                                                onChange={(e) => {
+                                                    if (e.target.checked) {
+                                                        setBulkAssignData({ ...bulkAssignData, employee_ids: employees.map((emp: ActiveEmployee) => emp.id) })
+                                                    } else {
+                                                        setBulkAssignData({ ...bulkAssignData, employee_ids: [] })
+                                                    }
+                                                }}
+                                            />
+                                            <span className="text-sm font-medium">Select All</span>
+                                        </label>
+                                        <div className="max-h-48 overflow-y-auto">
+                                            {employees.map((emp: ActiveEmployee) => (
+                                                <label key={emp.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/30">
+                                                    <input
+                                                        type="checkbox"
+                                                        className="rounded border-gray-300"
+                                                        checked={bulkAssignData.employee_ids.includes(emp.id)}
+                                                        onChange={(e) => {
+                                                            if (e.target.checked) {
+                                                                setBulkAssignData({ ...bulkAssignData, employee_ids: [...bulkAssignData.employee_ids, emp.id] })
+                                                            } else {
+                                                                setBulkAssignData({ ...bulkAssignData, employee_ids: bulkAssignData.employee_ids.filter(id => id !== emp.id) })
+                                                            }
+                                                        }}
+                                                    />
+                                                    <span className="text-sm">{emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}{emp.is_admin && <span className="ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Admin</span>}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
                                 </div>
                                 <div>
                                     <label className="label">Scheduled Date *</label>
@@ -1736,9 +2178,9 @@ export default function TasksPage() {
                                     <button
                                         type="submit"
                                         className="btn-primary flex-1"
-                                        disabled={saving}
+                                        disabled={saving || bulkAssignData.employee_ids.length === 0}
                                     >
-                                        {saving ? 'Assigning...' : `Assign ${selectedTaskIds.size} Task${selectedTaskIds.size > 1 ? 's' : ''}`}
+                                        {saving ? 'Assigning...' : `Assign ${selectedTaskIds.size} Task${selectedTaskIds.size > 1 ? 's' : ''} to ${bulkAssignData.employee_ids.length} Employee${bulkAssignData.employee_ids.length !== 1 ? 's' : ''}`}
                                     </button>
                                 </div>
                             </form>
@@ -1785,35 +2227,59 @@ export default function TasksPage() {
                                         onChange={(e) => setFormData({ ...formData, location: e.target.value })}
                                     />
                                 </div>
-                                <div className="grid grid-cols-3 gap-4">
+                                <div>
+                                    <label className="label">Target Role</label>
+                                    <select
+                                        className="input"
+                                        value={formData.role_target}
+                                        onChange={(e) => setFormData({ ...formData, role_target: e.target.value })}
+                                    >
+                                        <option value="all">All Staff</option>
+                                        <option value="employee">Employees Only</option>
+                                        <option value="admin">Admins Only</option>
+                                    </select>
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                     <div>
-                                        <label className="label">Target Role</label>
-                                        <select
-                                            className="input"
-                                            value={formData.role_target}
-                                            onChange={(e) => setFormData({ ...formData, role_target: e.target.value })}
-                                        >
-                                            <option value="all">All Staff</option>
-                                            <option value="employee">Employees Only</option>
-                                            <option value="admin">Admins Only</option>
-                                        </select>
-                                    </div>
-                                    <div>
-                                        <label className="label">Due Date</label>
+                                        <div className="flex items-center gap-3 mb-1">
+                                            <label className="label mb-0">Due Date</label>
+                                            <label className="flex items-center gap-1.5 cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!formData.scheduled_date}
+                                                    onChange={(e) => setFormData({ ...formData, scheduled_date: e.target.checked ? '' : getTodayNY() })}
+                                                    className="rounded border-gray-300"
+                                                />
+                                                <span className="text-xs text-muted-foreground whitespace-nowrap">No due date</span>
+                                            </label>
+                                        </div>
                                         <input
                                             type="date"
-                                            className="input"
+                                            className={`input ${!formData.scheduled_date ? 'opacity-50' : ''}`}
                                             value={formData.scheduled_date}
                                             onChange={(e) => setFormData({ ...formData, scheduled_date: e.target.value })}
+                                            disabled={!formData.scheduled_date}
                                         />
                                     </div>
                                     <div>
-                                        <label className="label">Cutoff Time</label>
+                                        <div className="flex items-center gap-3 mb-1">
+                                            <label className="label mb-0">Deadline</label>
+                                            <label className="flex items-center gap-1.5 cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!formData.cutoff_time}
+                                                    onChange={(e) => setFormData({ ...formData, cutoff_time: e.target.checked ? '' : '17:00' })}
+                                                    className="rounded border-gray-300"
+                                                />
+                                                <span className="text-xs text-muted-foreground whitespace-nowrap">No deadline</span>
+                                            </label>
+                                        </div>
                                         <input
                                             type="time"
-                                            className="input"
+                                            className={`input ${!formData.cutoff_time ? 'opacity-50' : ''}`}
                                             value={formData.cutoff_time}
                                             onChange={(e) => setFormData({ ...formData, cutoff_time: e.target.value })}
+                                            disabled={!formData.cutoff_time}
                                         />
                                     </div>
                                 </div>
@@ -1881,9 +2347,6 @@ export default function TasksPage() {
                                         <span className="text-xs text-muted-foreground ml-2">
                                             ({existingRefImageUrls.length + refImagePreviews.length} added)
                                         </span>
-                                    </p>
-                                    <p className="text-xs text-muted-foreground">
-                                        Add example images to show employees what the completed task should look like
                                     </p>
                                     <input
                                         ref={refImageInputRef}
@@ -1962,7 +2425,7 @@ export default function TasksPage() {
                                         )}
                                     </p>
                                     <p className="text-xs text-muted-foreground mb-2">
-                                        Add example videos to show employees how to complete the task (max 10GB per video)
+                                        Add example videos to show employees how to complete the task (max 100GB per video)
                                     </p>
                                     <input
                                         ref={refVideoInputRef}
@@ -2028,8 +2491,16 @@ export default function TasksPage() {
                                         </div>
                                     )}
                                     {videoUploadProgress && (
-                                        <div className="mb-2 p-2 bg-primary/10 rounded-lg">
-                                            <p className="text-xs text-primary">{videoUploadProgress}</p>
+                                        <div className={`mb-2 p-2 rounded-lg ${videoUploadProgress.includes('No internet') ? 'bg-red-100 dark:bg-red-900/20' : videoUploadProgress.includes('Reconnected') ? 'bg-green-100 dark:bg-green-900/20' : 'bg-primary/10'}`}>
+                                            <p className={`text-xs mb-1 ${videoUploadProgress.includes('No internet') ? 'text-red-600 dark:text-red-400' : videoUploadProgress.includes('Reconnected') ? 'text-green-600 dark:text-green-400' : 'text-primary'}`}>
+                                                {videoUploadProgress.includes('No internet') ? '📡' : '⏳'} {videoUploadProgress}
+                                            </p>
+                                            {videoUploadPercent > 0 && (
+                                                <div className={`w-full rounded-full h-2 ${videoUploadProgress.includes('No internet') ? 'bg-red-200 dark:bg-red-800' : 'bg-primary/20'}`}>
+                                                    <div className={`h-2 rounded-full transition-all duration-300 ${videoUploadProgress.includes('No internet') ? 'bg-red-500 dark:bg-red-400' : 'bg-primary'}`}
+                                                         style={{ width: `${videoUploadPercent}%` }} />
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                     <button
@@ -2059,20 +2530,43 @@ export default function TasksPage() {
                                     {formData.assign_now && (
                                         <div className="bg-muted/30 p-4 rounded-lg">
                                             <div>
-                                                <label className="label">Employee *</label>
-                                                <select
-                                                    className="input"
-                                                    value={formData.employee_id}
-                                                    onChange={(e) => setFormData({ ...formData, employee_id: e.target.value })}
-                                                    required={formData.assign_now}
-                                                >
-                                                    <option value="">Select employee</option>
-                                                    {employees.map((emp: ActiveEmployee) => (
-                                                        <option key={emp.id} value={emp.id}>
-                                                            {emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}
-                                                        </option>
-                                                    ))}
-                                                </select>
+                                                <label className="label">Employees * ({formData.employee_ids.length} selected)</label>
+                                                <div className="border rounded-md">
+                                                    <label className="flex items-center gap-2 px-3 py-2 border-b bg-muted/30 cursor-pointer hover:bg-muted/50">
+                                                        <input
+                                                            type="checkbox"
+                                                            className="rounded border-gray-300"
+                                                            checked={employees.length > 0 && formData.employee_ids.length === employees.length}
+                                                            onChange={(e) => {
+                                                                if (e.target.checked) {
+                                                                    setFormData({ ...formData, employee_ids: employees.map((emp: ActiveEmployee) => emp.id) })
+                                                                } else {
+                                                                    setFormData({ ...formData, employee_ids: [] })
+                                                                }
+                                                            }}
+                                                        />
+                                                        <span className="text-sm font-medium">Select All</span>
+                                                    </label>
+                                                    <div className="max-h-48 overflow-y-auto">
+                                                        {employees.map((emp: ActiveEmployee) => (
+                                                            <label key={emp.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/30">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    className="rounded border-gray-300"
+                                                                    checked={formData.employee_ids.includes(emp.id)}
+                                                                    onChange={(e) => {
+                                                                        if (e.target.checked) {
+                                                                            setFormData({ ...formData, employee_ids: [...formData.employee_ids, emp.id] })
+                                                                        } else {
+                                                                            setFormData({ ...formData, employee_ids: formData.employee_ids.filter(id => id !== emp.id) })
+                                                                        }
+                                                                    }}
+                                                                />
+                                                                <span className="text-sm">{emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}{emp.is_admin && <span className="ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Admin</span>}</span>
+                                                            </label>
+                                                        ))}
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                     )}
@@ -2109,20 +2603,53 @@ export default function TasksPage() {
                             <p className="text-muted-foreground mb-4">{assigningTask.title}</p>
                             <form onSubmit={handleAssign} className="space-y-4">
                                 <div>
-                                    <label className="label">Employee *</label>
-                                    <select
+                                    <label className="label">Employees * ({assignData.employee_ids.length} selected)</label>
+                                    <div className="border rounded-md">
+                                        <label className="flex items-center gap-2 px-3 py-2 border-b bg-muted/30 cursor-pointer hover:bg-muted/50">
+                                            <input
+                                                type="checkbox"
+                                                className="rounded border-gray-300"
+                                                checked={employees.length > 0 && assignData.employee_ids.length === employees.length}
+                                                onChange={(e) => {
+                                                    if (e.target.checked) {
+                                                        setAssignData({ ...assignData, employee_ids: employees.map((emp: ActiveEmployee) => emp.id) })
+                                                    } else {
+                                                        setAssignData({ ...assignData, employee_ids: [] })
+                                                    }
+                                                }}
+                                            />
+                                            <span className="text-sm font-medium">Select All</span>
+                                        </label>
+                                        <div className="max-h-48 overflow-y-auto">
+                                            {employees.map((emp: ActiveEmployee) => (
+                                                <label key={emp.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/30">
+                                                    <input
+                                                        type="checkbox"
+                                                        className="rounded border-gray-300"
+                                                        checked={assignData.employee_ids.includes(emp.id)}
+                                                        onChange={(e) => {
+                                                            if (e.target.checked) {
+                                                                setAssignData({ ...assignData, employee_ids: [...assignData.employee_ids, emp.id] })
+                                                            } else {
+                                                                setAssignData({ ...assignData, employee_ids: assignData.employee_ids.filter(id => id !== emp.id) })
+                                                            }
+                                                        }}
+                                                    />
+                                                    <span className="text-sm">{emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}{emp.is_admin && <span className="ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Admin</span>}</span>
+                                                </label>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="label">Scheduled Date *</label>
+                                    <input
+                                        type="date"
                                         required
                                         className="input"
-                                        value={assignData.employee_id}
-                                        onChange={(e) => setAssignData({ ...assignData, employee_id: e.target.value })}
-                                    >
-                                        <option value="">Select an employee</option>
-                                        {employees.map((emp: ActiveEmployee) => (
-                                            <option key={emp.id} value={emp.id}>
-                                                {emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}
-                                            </option>
-                                        ))}
-                                    </select>
+                                        value={assignData.scheduled_date}
+                                        onChange={(e) => setAssignData({ ...assignData, scheduled_date: e.target.value })}
+                                    />
                                 </div>
                                 <div className="flex gap-3 pt-4">
                                     <button
@@ -2135,9 +2662,9 @@ export default function TasksPage() {
                                     <button
                                         type="submit"
                                         className="btn-primary flex-1"
-                                        disabled={saving}
+                                        disabled={saving || assignData.employee_ids.length === 0}
                                     >
-                                        {saving ? 'Assigning...' : 'Assign Task'}
+                                        {saving ? 'Assigning...' : `Assign to ${assignData.employee_ids.length} Employee${assignData.employee_ids.length !== 1 ? 's' : ''}`}
                                     </button>
                                 </div>
                             </form>
@@ -2212,7 +2739,7 @@ export default function TasksPage() {
                                 )}
                                 {viewingInstance.tasks?.cutoff_time && (
                                     <div className="bg-muted/50 rounded-lg p-4">
-                                        <p className="text-xs text-muted-foreground mb-1">Cutoff Time</p>
+                                        <p className="text-xs text-muted-foreground mb-1">Deadline</p>
                                         <p className="font-medium">⏰ {formatTimeString(viewingInstance.tasks.cutoff_time)}</p>
                                     </div>
                                 )}
@@ -2234,9 +2761,6 @@ export default function TasksPage() {
                                     <h3 className="text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
                                         🖼️ Reference Images ({signedRefImageUrls.length})
                                     </h3>
-                                    <p className="text-xs text-muted-foreground mb-2">
-                                        Example images showing what the completed task should look like
-                                    </p>
                                     <div className={`grid gap-2 ${signedRefImageUrls.length === 1 ? '' : 'grid-cols-2 sm:grid-cols-3'}`}>
                                         {signedRefImageUrls.map((url, index) => (
                                             <img
@@ -2258,18 +2782,23 @@ export default function TasksPage() {
                                     <h3 className="text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
                                         🎥 Reference Videos ({signedRefVideoUrls.length})
                                     </h3>
-                                    <p className="text-xs text-muted-foreground mb-2">
-                                        Example videos showing how to complete the task
-                                    </p>
                                     <div className="space-y-2">
                                         {signedRefVideoUrls.map((url, index) => (
-                                            <video
-                                                key={index}
-                                                src={`${url}#t=0.1`}
-                                                preload="metadata"
-                                                controls
-                                                className="w-full rounded-lg max-h-64"
-                                            />
+                                            <div key={index} className="relative group">
+                                                <video
+                                                    src={`${url}#t=0.1`}
+                                                    preload="metadata"
+                                                    controls
+                                                    className="w-full rounded-lg max-h-64"
+                                                />
+                                                <button
+                                                    onClick={() => setFullscreenVideoUrl(url)}
+                                                    className="absolute top-2 right-2 bg-black/60 hover:bg-black/80 text-white rounded-lg p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                    title="View fullscreen"
+                                                >
+                                                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                                                </button>
+                                            </div>
                                         ))}
                                     </div>
                                 </div>
@@ -2303,79 +2832,111 @@ export default function TasksPage() {
                                     </div>
                                 )}
 
-                                {/* Photos - Multiple support */}
-                                {(signedPhotoUrls.length > 0 || viewingInstance.photo_url) ? (
-                                    <div className="mb-6">
-                                        <h4 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
-                                            📷 Photos ({signedPhotoUrls.length})
-                                        </h4>
-                                        <div className="bg-muted/30 rounded-lg p-2">
-                                            {signedPhotoUrls.length > 0 ? (
-                                                <>
-                                                    <div className={`grid gap-2 ${signedPhotoUrls.length === 1 ? '' : 'grid-cols-2'}`}>
-                                                        {signedPhotoUrls.map((url, index) => (
-                                                            <img
-                                                                key={index}
-                                                                src={url}
-                                                                alt={`Task submission photo ${index + 1}`}
-                                                                className={`w-full rounded-lg cursor-pointer hover:opacity-90 transition-opacity ${signedPhotoUrls.length === 1 ? 'max-h-96 object-contain mx-auto' : 'h-40 object-cover'}`}
-                                                                onClick={() => window.open(url, '_blank')}
-                                                            />
-                                                        ))}
-                                                    </div>
-                                                    <p className="text-xs text-center text-muted-foreground mt-2">Click to view full size</p>
-                                                </>
-                                            ) : (
-                                                <div className="flex items-center justify-center h-48 text-muted-foreground">
-                                                    <div className="animate-pulse">Loading images...</div>
-                                                </div>
-                                            )}
+                                {/* Auto-deleted media banner */}
+                                {viewingInstance.media_deleted_at && (
+                                    <div className="mb-6 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-4 flex items-start gap-3">
+                                        <svg className="w-5 h-5 text-amber-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                                        </svg>
+                                        <div>
+                                            <p className="text-sm font-medium text-amber-800 dark:text-amber-200">
+                                                {viewingInstance.media_deleted_by_name || 'Media automatically deleted after 72 hrs'}
+                                            </p>
+                                            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+                                                Deleted on {new Date(viewingInstance.media_deleted_at).toLocaleString('en-US', {
+                                                    timeZone: 'America/New_York',
+                                                    month: 'short',
+                                                    day: 'numeric',
+                                                    year: 'numeric',
+                                                    hour: '2-digit',
+                                                    minute: '2-digit',
+                                                })}
+                                            </p>
                                         </div>
-                                    </div>
-                                ) : viewingInstance.tasks?.requires_photo && (
-                                    <div className="mb-6">
-                                        <h4 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
-                                            📷 Photo
-                                        </h4>
-                                        <p className="text-sm text-muted-foreground italic">No photo submitted yet</p>
                                     </div>
                                 )}
 
-                                {/* Video */}
-                                {(viewingInstance.video_urls && viewingInstance.video_urls.length > 0) || viewingInstance.video_url ? (
-                                    <div className="mb-6">
-                                        <h4 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
-                                            🎥 Video{signedVideoUrls.length > 1 ? `s (${signedVideoUrls.length})` : ''}
-                                        </h4>
-                                        <div className="bg-muted/30 rounded-lg p-2">
-                                            {signedVideoUrls.length > 0 ? (
-                                                <>
-                                                    <div className={`grid gap-2 ${signedVideoUrls.length === 1 ? '' : 'grid-cols-1'}`}>
-                                                        {signedVideoUrls.map((url, index) => (
-                                                            <video
-                                                                key={index}
-                                                                src={`${url}#t=0.1`}
-                                                                preload="metadata"
-                                                                controls
-                                                                className={`w-full rounded-lg ${signedVideoUrls.length === 1 ? 'max-h-96' : 'max-h-64'}`}
-                                                            />
-                                                        ))}
-                                                    </div>
-                                                </>
-                                            ) : (
-                                                <div className="flex items-center justify-center h-48 text-muted-foreground">
-                                                    <div className="animate-pulse">Loading videos...</div>
+                                {/* Photos - Multiple support */}
+                                {(signedPhotoUrls.length > 0 || viewingInstance.photo_url) ? (
+                                            <div className="mb-6">
+                                                <h4 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
+                                                    📷 Photos ({signedPhotoUrls.length})
+                                                </h4>
+                                                <div className="bg-muted/30 rounded-lg p-2">
+                                                    {signedPhotoUrls.length > 0 ? (
+                                                        <>
+                                                            <div className={`grid gap-2 ${signedPhotoUrls.length === 1 ? '' : 'grid-cols-2'}`}>
+                                                                {signedPhotoUrls.map((url, index) => (
+                                                                    <img
+                                                                        key={index}
+                                                                        src={url}
+                                                                        alt={`Task submission photo ${index + 1}`}
+                                                                        className={`w-full rounded-lg cursor-pointer hover:opacity-90 transition-opacity ${signedPhotoUrls.length === 1 ? 'max-h-96 object-contain mx-auto' : 'h-40 object-cover'}`}
+                                                                        onClick={() => window.open(url, '_blank')}
+                                                                    />
+                                                                ))}
+                                                            </div>
+                                                            <p className="text-xs text-center text-muted-foreground mt-2">Click to view full size</p>
+                                                        </>
+                                                    ) : (
+                                                        <div className="flex items-center justify-center h-48 text-muted-foreground">
+                                                            <div className="animate-pulse">Loading images...</div>
+                                                        </div>
+                                                    )}
                                                 </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                ) : viewingInstance.tasks?.requires_video && (
-                                    <div className="mb-6">
-                                        <h4 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
-                                            🎥 Video
-                                        </h4>
-                                        <p className="text-sm text-muted-foreground italic">No video submitted yet</p>
-                                    </div>
+                                            </div>
+                                        ) : viewingInstance.tasks?.requires_photo && (
+                                            <div className="mb-6">
+                                                <h4 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
+                                                    📷 Photo
+                                                </h4>
+                                                <p className="text-sm text-muted-foreground italic">No photo submitted yet</p>
+                                            </div>
+                                        )}
+
+                                        {/* Video */}
+                                        {(viewingInstance.video_urls && viewingInstance.video_urls.length > 0) || viewingInstance.video_url ? (
+                                            <div className="mb-6">
+                                                <h4 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
+                                                    🎥 Video{signedVideoUrls.length > 1 ? `s (${signedVideoUrls.length})` : ''}
+                                                </h4>
+                                                <div className="bg-muted/30 rounded-lg p-2">
+                                                    {signedVideoUrls.length > 0 ? (
+                                                        <>
+                                                            <div className={`grid gap-2 ${signedVideoUrls.length === 1 ? '' : 'grid-cols-1'}`}>
+                                                                {signedVideoUrls.map((url, index) => (
+                                                                    <div key={index} className="relative group">
+                                                                        <video
+                                                                            src={`${url}#t=0.1`}
+                                                                            preload="metadata"
+                                                                            controls
+                                                                            className={`w-full rounded-lg ${signedVideoUrls.length === 1 ? 'max-h-96' : 'max-h-64'}`}
+                                                                        />
+                                                                        <button
+                                                                            onClick={() => setFullscreenVideoUrl(url)}
+                                                                            className="absolute top-2 right-2 bg-black/60 hover:bg-black/80 text-white rounded-lg p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                                            title="View fullscreen"
+                                                                        >
+                                                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                                                                        </button>
+                                                                    </div>
+                                                                ))}
+                                                            </div>
+                                                        </>
+                                                    ) : (
+                                                        <div className="flex items-center justify-center h-48 text-muted-foreground">
+                                                            <div className="animate-pulse">Loading videos...</div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ) : viewingInstance.tasks?.requires_video && (
+                                            <div className="mb-6">
+                                                <h4 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
+                                                    🎥 Video
+                                                </h4>
+                                                <p className="text-sm text-muted-foreground italic">No video submitted yet</p>
+                                            </div>
                                 )}
 
                                 {/* No submissions message */}
@@ -2459,7 +3020,7 @@ export default function TasksPage() {
                                 )}
                                 {viewingTask.cutoff_time && (
                                     <div className="bg-muted/50 rounded-lg p-4">
-                                        <p className="text-xs text-muted-foreground mb-1">Cutoff Time</p>
+                                        <p className="text-xs text-muted-foreground mb-1">Deadline</p>
                                         <p className="font-medium">⏰ {formatTimeString(viewingTask.cutoff_time)}</p>
                                     </div>
                                 )}
@@ -2467,6 +3028,7 @@ export default function TasksPage() {
                                     <p className="text-xs text-muted-foreground mb-1">Created</p>
                                     <p className="font-medium">
                                         {new Date(viewingTask.created_at).toLocaleDateString('en-US', {
+                                            timeZone: 'America/New_York',
                                             month: 'short',
                                             day: 'numeric',
                                             year: 'numeric'
@@ -2502,9 +3064,6 @@ export default function TasksPage() {
                                     <h3 className="text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
                                         🖼️ Reference Images ({viewingTask.reference_images?.length || 0})
                                     </h3>
-                                    <p className="text-xs text-muted-foreground mb-3">
-                                        Example images showing what the completed task should look like
-                                    </p>
                                     {taskDetailRefImageUrls.length > 0 ? (
                                         <div className={`grid gap-3 ${taskDetailRefImageUrls.length === 1 ? '' : 'grid-cols-2 sm:grid-cols-3'}`}>
                                             {taskDetailRefImageUrls.map((url, index) => (
@@ -2540,19 +3099,24 @@ export default function TasksPage() {
                                     <h3 className="text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
                                         🎬 Reference Videos ({viewingTask.reference_videos?.length || 0})
                                     </h3>
-                                    <p className="text-xs text-muted-foreground mb-3">
-                                        Example videos showing how to complete the task
-                                    </p>
                                     {taskDetailRefVideoUrls.length > 0 ? (
                                         <div className="space-y-3">
                                             {taskDetailRefVideoUrls.map((url, index) => (
-                                                <video
-                                                    key={index}
-                                                    src={`${url}#t=0.1`}
-                                                    preload="metadata"
-                                                    controls
-                                                    className="w-full rounded-lg max-h-80 border shadow-sm"
-                                                />
+                                                <div key={index} className="relative group">
+                                                    <video
+                                                        src={`${url}#t=0.1`}
+                                                        preload="metadata"
+                                                        controls
+                                                        className="w-full rounded-lg max-h-80 border shadow-sm"
+                                                    />
+                                                    <button
+                                                        onClick={() => setFullscreenVideoUrl(url)}
+                                                        className="absolute top-2 right-2 bg-black/60 hover:bg-black/80 text-white rounded-lg p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                        title="View fullscreen"
+                                                    >
+                                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
+                                                    </button>
+                                                </div>
                                             ))}
                                         </div>
                                     ) : (
@@ -2611,6 +3175,25 @@ export default function TasksPage() {
                             </div>
                         </div>
                     </div>
+                </div>
+            )}
+
+            {/* Fullscreen Video Overlay */}
+            {fullscreenVideoUrl && (
+                <div className="fixed inset-0 z-[200] bg-black flex items-center justify-center" onClick={() => setFullscreenVideoUrl(null)}>
+                    <button
+                        onClick={() => setFullscreenVideoUrl(null)}
+                        className="absolute top-4 right-4 text-white bg-white/20 hover:bg-white/30 rounded-full p-2 z-10"
+                    >
+                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                    </button>
+                    <video
+                        src={fullscreenVideoUrl}
+                        controls
+                        autoPlay
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ maxWidth: '100vw', maxHeight: '100vh' }}
+                    />
                 </div>
             )}
         </div>

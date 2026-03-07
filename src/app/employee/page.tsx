@@ -3,9 +3,11 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { formatTime, formatDateTime, formatTimeString } from '@/lib/utils'
+import { formatTime, formatDateTime, formatTimeString, getTodayNY, getNYOffsetStr } from '@/lib/utils'
 import { RichTextDisplay } from '@/components/RichTextEditor'
 import { getDeviceInfo, formatDeviceDisplay } from '@/lib/device'
+import { captureLocation } from '@/lib/geolocation'
+import { logClockDebug } from '@/lib/clock-debug-log'
 import {
     useEmployeeDashboard,
     useOpenAttendance,
@@ -55,6 +57,10 @@ export default function EmployeeDashboard() {
     const [showDevicePrompt, setShowDevicePrompt] = useState(false)
     const [deviceRegistering, setDeviceRegistering] = useState(false)
     const [currentDeviceInfo, setCurrentDeviceInfo] = useState<{ deviceId: string; deviceName: string } | null>(null)
+
+    // Pending tasks reminder state
+    const [showPendingTasksModal, setShowPendingTasksModal] = useState(false)
+    const [pendingTaskReminderSending, setPendingTaskReminderSending] = useState(false)
 
     // Log page view
     useEffect(() => {
@@ -126,15 +132,24 @@ export default function EmployeeDashboard() {
         ? registeredDeviceId !== currentDeviceInfo.deviceId
         : false
 
-    // Get current device info on mount
+    // Get current device info when user is available
     useEffect(() => {
-        const info = getDeviceInfo()
-        setCurrentDeviceInfo(info)
-    }, [])
+        if (!user?.id) return
+        let stale = false
+        getDeviceInfo(user.id).then((info) => {
+            if (!stale) setCurrentDeviceInfo(info)
+        })
+        return () => { stale = true }
+    }, [user?.id])
 
     // Register device for this employee
     const handleRegisterDevice = useCallback(async () => {
         if (!user?.id || !currentDeviceInfo) return
+
+        logClockDebug('device_registration', 'device_register_start', 'info', 'Starting device registration', {
+            deviceId: currentDeviceInfo.deviceId,
+            deviceName: currentDeviceInfo.deviceName,
+        }, currentDeviceInfo)
 
         setDeviceRegistering(true)
         try {
@@ -144,7 +159,17 @@ export default function EmployeeDashboard() {
                 p_device_name: currentDeviceInfo.deviceName
             })
 
-            if (error) throw error
+            if (error) {
+                logClockDebug('device_registration', 'device_register', 'fail', `Device registration failed: ${error.message}`, {
+                    errorCode: error.code,
+                    errorMessage: error.message,
+                }, currentDeviceInfo)
+                throw error
+            }
+
+            logClockDebug('device_registration', 'device_register', 'pass', 'Device registered successfully', {
+                deviceId: currentDeviceInfo.deviceId,
+            }, currentDeviceInfo)
 
             // Invalidate device cache
             invalidateQueries.all()
@@ -161,34 +186,59 @@ export default function EmployeeDashboard() {
 
     // Handle clock in with device verification
     const handleClockIn = async () => {
+        // Step 1: Auth check
         if (!user?.id) {
+            logClockDebug('clock_in', 'auth_check', 'fail', 'User not logged in')
             alert('You must be logged in to clock in')
             return
         }
+        logClockDebug('clock_in', 'auth_check', 'pass', 'User authenticated', { userId: user.id }, currentDeviceInfo)
 
+        // Step 2: Device detection
         if (!currentDeviceInfo) {
+            logClockDebug('device_registration', 'device_detection', 'fail', 'Unable to detect device info')
             alert('Unable to identify your device. Please refresh the page.')
             return
         }
+        logClockDebug('device_registration', 'device_detection', 'pass', 'Device detected', {
+            deviceId: currentDeviceInfo.deviceId,
+            deviceName: currentDeviceInfo.deviceName,
+        }, currentDeviceInfo)
 
-        // If no device is registered, prompt to register this device
+        // Step 3: Device registered check
         if (!registeredDeviceId) {
+            logClockDebug('device_registration', 'device_registered', 'fail', 'No device registered — prompting registration', {
+                currentDeviceId: currentDeviceInfo.deviceId,
+            }, currentDeviceInfo)
             setShowDevicePrompt(true)
             return
         }
+        logClockDebug('device_registration', 'device_registered', 'pass', 'Device is registered', {
+            registeredDeviceId,
+            registeredDeviceName: registeredDeviceName,
+        }, currentDeviceInfo)
 
-        // Check if current device matches registered device
+        // Step 4: Device match
         if (registeredDeviceId !== currentDeviceInfo.deviceId) {
+            logClockDebug('device_registration', 'device_match', 'fail', 'Device mismatch', {
+                registeredDeviceId,
+                currentDeviceId: currentDeviceInfo.deviceId,
+                registeredDeviceName,
+                currentDeviceName: currentDeviceInfo.deviceName,
+            }, currentDeviceInfo)
             alert('You can only clock in from your registered device. Please use your registered device or contact admin to update your device.')
             return
         }
+        logClockDebug('device_registration', 'device_match', 'pass', 'Device matches registered device', {
+            deviceId: currentDeviceInfo.deviceId,
+        }, currentDeviceInfo)
 
         setClockLoading(true)
 
         try {
             const supabase = createUntypedClient()
 
-            // Check if already clocked in
+            // Step 5: Already clocked in check
             const { data: existing } = await supabase
                 .from('attendance_logs')
                 .select('id')
@@ -197,12 +247,25 @@ export default function EmployeeDashboard() {
                 .limit(1)
 
             if (existing && existing.length > 0) {
+                logClockDebug('clock_in', 'already_clocked_in', 'fail', 'Already clocked in', {
+                    existingAttendanceId: existing[0].id,
+                }, currentDeviceInfo)
                 alert('You are already clocked in')
                 mutateAttendance()
                 return
             }
+            logClockDebug('clock_in', 'already_clocked_in', 'pass', 'Not currently clocked in', undefined, currentDeviceInfo)
 
-            // Insert with device data
+            // Step 6: GPS capture
+            const location = await captureLocation()
+            logClockDebug('clock_in', 'gps_capture', 'info', `GPS: ${location.status}`, {
+                status: location.status,
+                lat: location.lat,
+                lng: location.lng,
+                accuracy: location.accuracy,
+            }, currentDeviceInfo)
+
+            // Step 7: DB insert
             const { error } = await supabase
                 .from('attendance_logs')
                 .insert({
@@ -210,46 +273,145 @@ export default function EmployeeDashboard() {
                     clock_in: new Date().toISOString(),
                     clock_in_device_id: currentDeviceInfo.deviceId,
                     clock_in_device_name: currentDeviceInfo.deviceName,
+                    clock_in_lat: location.lat,
+                    clock_in_lng: location.lng,
+                    clock_in_accuracy: location.accuracy,
+                    clock_in_location_status: location.status,
                 })
-            if (error) throw error
+
+            if (error) {
+                logClockDebug('clock_in', 'db_insert', 'fail', `DB insert failed: ${error.message}`, {
+                    errorCode: error.code,
+                    errorMessage: error.message,
+                    errorDetails: error.details,
+                }, currentDeviceInfo)
+                throw error
+            }
+            logClockDebug('clock_in', 'db_insert', 'pass', 'Attendance record created', undefined, currentDeviceInfo)
 
             // Log clock in action
             logButtonClick('Clock In', 'attendance', { deviceId: currentDeviceInfo.deviceId })
 
+            logClockDebug('clock_in', 'complete', 'success', 'Clock in completed successfully', undefined, currentDeviceInfo)
+
             mutateAttendance()
         } catch (err) {
             console.error('Clock in error:', err)
+            logClockDebug('clock_in', 'error', 'fail', `Clock in error: ${err instanceof Error ? err.message : 'Unknown error'}`, {
+                error: err instanceof Error ? err.message : String(err),
+            }, currentDeviceInfo)
             alert('Failed to clock in. Please try again.')
         } finally {
             setClockLoading(false)
         }
     }
 
-    // Handle clock out with device verification
-    const handleClockOut = async () => {
+    // Perform the actual clock out (extracted so modal can call it too)
+    const performClockOut = async () => {
+        // Step 1: Auth check
         if (!user?.id || !clockedIn) {
+            logClockDebug('clock_out', 'auth_check', 'fail', 'User not clocked in or not logged in', {
+                hasUser: !!user?.id,
+                hasClockedIn: !!clockedIn,
+            })
             alert('You must be clocked in to clock out')
             return
         }
+        logClockDebug('clock_out', 'auth_check', 'pass', 'User authenticated and clocked in', {
+            userId: user.id,
+            attendanceId: clockedIn.id,
+        }, currentDeviceInfo)
 
+        // Step 2: Device detection
         if (!currentDeviceInfo) {
+            logClockDebug('device_registration', 'device_detection', 'fail', 'Unable to detect device info')
             alert('Unable to identify your device. Please refresh the page.')
             return
         }
+        logClockDebug('device_registration', 'device_detection', 'pass', 'Device detected', {
+            deviceId: currentDeviceInfo.deviceId,
+            deviceName: currentDeviceInfo.deviceName,
+        }, currentDeviceInfo)
 
         setClockLoading(true)
 
         try {
             const supabase = createUntypedClient()
-            const clockOutTime = new Date().toISOString()
+            const actualClockOutTime = new Date()
+            const actualClockOutISO = actualClockOutTime.toISOString()
 
-            // Direct update with device data
+            // Step 3: GPS capture
+            const location = await captureLocation()
+            logClockDebug('clock_out', 'gps_capture', 'info', `GPS: ${location.status}`, {
+                status: location.status,
+                lat: location.lat,
+                lng: location.lng,
+                accuracy: location.accuracy,
+            }, currentDeviceInfo)
+
+            // Step 4: Schedule lookup
+            const todayNY = getTodayNY()
+            let effectiveClockOut = actualClockOutISO
+            let lateClockOutMinutes: number | null = null
+            let actualClockOutValue: string | null = null
+
+            const { data: schedules } = await supabase
+                .from('schedules')
+                .select('schedule_date, end_time')
+                .eq('employee_id', user.id)
+                .eq('schedule_date', todayNY)
+                .neq('status', 'cancelled')
+                .order('start_time', { ascending: true })
+
+            logClockDebug('clock_out', 'schedule_lookup', 'info',
+                schedules && schedules.length > 0
+                    ? `Found ${schedules.length} schedule(s) for today`
+                    : 'No schedules found for today',
+                {
+                    todayNY,
+                    scheduleCount: schedules?.length || 0,
+                    schedules: schedules?.map((s: { schedule_date: string; end_time: string | null }) => ({ date: s.schedule_date, endTime: s.end_time })),
+                }, currentDeviceInfo)
+
+            if (schedules && schedules.length > 0) {
+                // Use the last schedule (latest end_time)
+                const lastSchedule = schedules[schedules.length - 1]
+                if (lastSchedule.end_time) {
+                    const offsetStr = getNYOffsetStr(todayNY)
+                    const scheduledEndUTC = new Date(`${todayNY}T${lastSchedule.end_time}${offsetStr}`)
+
+                    if (actualClockOutTime.getTime() > scheduledEndUTC.getTime()) {
+                        // Employee clocked out late — cap at scheduled end time
+                        effectiveClockOut = scheduledEndUTC.toISOString()
+                        actualClockOutValue = actualClockOutISO
+                        lateClockOutMinutes = Math.ceil(
+                            (actualClockOutTime.getTime() - scheduledEndUTC.getTime()) / 60000
+                        )
+
+                        // Step 4b: Late checkout info
+                        logClockDebug('clock_out', 'late_checkout', 'info', `Late by ${lateClockOutMinutes} min — capped at scheduled end`, {
+                            scheduledEnd: scheduledEndUTC.toISOString(),
+                            actualClockOut: actualClockOutISO,
+                            effectiveClockOut,
+                            lateMinutes: lateClockOutMinutes,
+                        }, currentDeviceInfo)
+                    }
+                }
+            }
+
+            // Step 5: DB update
             const { data, error } = await supabase
                 .from('attendance_logs')
                 .update({
-                    clock_out: clockOutTime,
+                    clock_out: effectiveClockOut,
+                    actual_clock_out: actualClockOutValue,
+                    late_clock_out_minutes: lateClockOutMinutes,
                     clock_out_device_id: currentDeviceInfo.deviceId,
                     clock_out_device_name: currentDeviceInfo.deviceName,
+                    clock_out_lat: location.lat,
+                    clock_out_lng: location.lng,
+                    clock_out_accuracy: location.accuracy,
+                    clock_out_location_status: location.status,
                     total_hours: null
                 })
                 .eq('id', clockedIn.id)
@@ -258,14 +420,30 @@ export default function EmployeeDashboard() {
 
             if (error) {
                 console.error('Clock out error:', error)
+                logClockDebug('clock_out', 'db_update', 'fail', `DB update failed: ${error.message}`, {
+                    errorCode: error.code,
+                    errorMessage: error.message,
+                    errorDetails: error.details,
+                    attendanceId: clockedIn.id,
+                }, currentDeviceInfo)
                 throw error
             }
+            logClockDebug('clock_out', 'db_update', 'pass', 'Attendance record updated', {
+                attendanceId: clockedIn.id,
+                effectiveClockOut,
+            }, currentDeviceInfo)
 
-            // Calculate total_hours if trigger didn't
+            // Step 6: Hours calculation fallback
             if (data && data.clock_in && !data.total_hours) {
                 const clockInTime = new Date(data.clock_in).getTime()
-                const clockOutTimeMs = new Date(clockOutTime).getTime()
+                const clockOutTimeMs = new Date(effectiveClockOut).getTime()
                 const totalHours = (clockOutTimeMs - clockInTime) / (1000 * 60 * 60)
+
+                logClockDebug('clock_out', 'hours_calc', 'info', `Fallback hours calc: ${totalHours.toFixed(2)}h`, {
+                    clockIn: data.clock_in,
+                    clockOut: effectiveClockOut,
+                    totalHours,
+                }, currentDeviceInfo)
 
                 await supabase
                     .from('attendance_logs')
@@ -276,14 +454,61 @@ export default function EmployeeDashboard() {
             // Log clock out action
             logButtonClick('Clock Out', 'attendance', { deviceId: currentDeviceInfo.deviceId })
 
+            logClockDebug('clock_out', 'complete', 'success', 'Clock out completed successfully', undefined, currentDeviceInfo)
+
             mutateAttendance()
         } catch (err) {
             console.error('Clock out error:', err)
+            logClockDebug('clock_out', 'error', 'fail', `Clock out error: ${err instanceof Error ? err.message : 'Unknown error'}`, {
+                error: err instanceof Error ? err.message : String(err),
+            }, currentDeviceInfo)
             const errorMessage = err instanceof Error ? err.message : 'Unknown error'
             alert(`Failed to clock out: ${errorMessage}`)
         } finally {
             setClockLoading(false)
         }
+    }
+
+    // Handle clock out - check for pending tasks first
+    const handleClockOut = () => {
+        if (!user?.id || !clockedIn) {
+            alert('You must be clocked in to clock out')
+            return
+        }
+
+        if (!currentDeviceInfo) {
+            alert('Unable to identify your device. Please refresh the page.')
+            return
+        }
+
+        // Compute pending tasks from the tasks already loaded
+        const currentPendingTasks = tasks.filter((t) => t.status === 'pending')
+        if (currentPendingTasks.length > 0) {
+            setShowPendingTasksModal(true)
+            return
+        }
+
+        performClockOut()
+    }
+
+    // Handle clock out with reminder email
+    const handleClockOutWithReminder = async () => {
+        setPendingTaskReminderSending(true)
+        setShowPendingTasksModal(false)
+
+        await performClockOut()
+
+        // Fire-and-forget: send reminder email
+        const currentPendingTasks = tasks.filter((t) => t.status === 'pending')
+        if (currentPendingTasks.length > 0) {
+            fetch('/api/tasks/reminder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ taskNames: currentPendingTasks.map((t) => t.title) }),
+            }).catch((err) => console.error('Failed to send task reminder:', err))
+        }
+
+        setPendingTaskReminderSending(false)
     }
 
     // Show loading only on initial auth load (with timeout to prevent infinite loading)
@@ -369,6 +594,69 @@ export default function EmployeeDashboard() {
                                     className="btn-secondary w-full"
                                 >
                                     Cancel
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Pending Tasks Warning Modal */}
+            {showPendingTasksModal && (
+                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                    <div className="bg-card rounded-xl shadow-xl w-full max-w-md border">
+                        <div className="p-6">
+                            <div className="text-center mb-6">
+                                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-yellow-100 dark:bg-yellow-900/30 flex items-center justify-center">
+                                    <svg className="w-8 h-8 text-yellow-600 dark:text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4.5c-.77-.833-2.694-.833-3.464 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                                    </svg>
+                                </div>
+                                <h2 className="text-xl font-bold mb-2">Pending Tasks</h2>
+                                <p className="text-muted-foreground text-sm">
+                                    You still have {pendingTasks.length} pending task{pendingTasks.length !== 1 ? 's' : ''} for today.
+                                </p>
+                            </div>
+
+                            {/* Pending task list */}
+                            <div className="mb-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg max-h-48 overflow-y-auto">
+                                <p className="text-sm font-medium text-yellow-800 dark:text-yellow-200 mb-2">
+                                    Unfinished Tasks
+                                </p>
+                                <ul className="space-y-1">
+                                    {pendingTasks.map((task) => (
+                                        <li key={task.id} className="text-sm text-yellow-700 dark:text-yellow-300 flex items-start gap-2">
+                                            <span className="flex-shrink-0 mt-0.5">⬜</span>
+                                            <span>{task.title}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+
+                            <div className="space-y-3">
+                                <button
+                                    onClick={() => setShowPendingTasksModal(false)}
+                                    className="btn-primary w-full"
+                                >
+                                    Go Back to Finish Tasks
+                                </button>
+
+                                <button
+                                    onClick={handleClockOutWithReminder}
+                                    disabled={pendingTaskReminderSending || clockLoading}
+                                    className="btn-destructive w-full flex items-center justify-center gap-2"
+                                >
+                                    {pendingTaskReminderSending || clockLoading ? (
+                                        <>
+                                            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                            </svg>
+                                            Clocking Out...
+                                        </>
+                                    ) : (
+                                        'Clock Out Anyway'
+                                    )}
                                 </button>
                             </div>
                         </div>

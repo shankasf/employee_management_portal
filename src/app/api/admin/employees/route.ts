@@ -75,7 +75,10 @@ export async function POST(request: NextRequest) {
             hr_notes,
         } = body
 
-        if (!email || !password || !full_name) {
+        // Normalize email to lowercase to match Supabase auth behavior
+        const normalizedEmail = email?.toLowerCase().trim()
+
+        if (!normalizedEmail || !password || !full_name) {
             serverLog.apiError('Missing required fields', { data: { email: !!email, password: !!password, full_name: !!full_name } })
             return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
         }
@@ -84,7 +87,7 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'Password must be at least 8 characters' }, { status: 400 })
         }
 
-        serverLog.api('Creating employee', { data: { email, full_name, position } })
+        serverLog.api('Creating employee', { data: { email: normalizedEmail, full_name, position } })
 
         // Use admin client to create user
         const adminClient = createAdminClient()
@@ -92,7 +95,7 @@ export async function POST(request: NextRequest) {
         // Create user in auth.users
         serverLog.db('Creating auth user')
         const { data: authData, error: authError } = await adminClient.auth.admin.createUser({
-            email,
+            email: normalizedEmail,
             password,
             email_confirm: true, // Auto-confirm email
             user_metadata: {
@@ -121,7 +124,7 @@ export async function POST(request: NextRequest) {
             .from('profiles')
             .upsert({
                 id: userId,
-                email,
+                email: normalizedEmail,
                 full_name,
                 role: role || 'employee',
                 status: 'active'
@@ -129,10 +132,11 @@ export async function POST(request: NextRequest) {
 
         if (profileError) {
             serverLog.dbError('Profile creation failed', { error: profileError })
+            console.error('Profile creation failed:', profileError.message)
             // Clean up auth user
             await adminClient.auth.admin.deleteUser(userId)
             return NextResponse.json({
-                error: `Failed to create profile: ${profileError.message}`
+                error: 'Failed to create employee'
             }, { status: 500 })
         }
 
@@ -167,11 +171,12 @@ export async function POST(request: NextRequest) {
 
         if (empError) {
             serverLog.dbError('Employee record creation failed', { error: empError })
+            console.error('Employee record creation failed:', empError.message)
             // Clean up auth user and profile
             await adminClient.from('profiles').delete().eq('id', userId)
             await adminClient.auth.admin.deleteUser(userId)
             return NextResponse.json({
-                error: `Failed to create employee record: ${empError.message}`
+                error: 'Failed to create employee'
             }, { status: 500 })
         }
 
@@ -205,7 +210,7 @@ export async function POST(request: NextRequest) {
             entityId: userId,
             entityName: display_name || full_name,
             details: {
-                email,
+                email: normalizedEmail,
                 position: position || null,
                 role: role || 'employee',
             },
@@ -216,7 +221,7 @@ export async function POST(request: NextRequest) {
         // Send welcome email with credentials (non-blocking)
         sendWelcomeEmail({
             employeeName: display_name || full_name,
-            email,
+            email: normalizedEmail,
             tempPassword: password,
         }).catch(err => console.error('Failed to send welcome email:', err))
 
@@ -232,7 +237,7 @@ export async function POST(request: NextRequest) {
         // Send notification to admin about new employee (non-blocking)
         sendEmployeeCreatedNotification({
             employeeName: display_name || full_name,
-            email,
+            email: normalizedEmail,
             position: position || undefined,
             createdAt: getCurrentNYTime(),
         }).catch(err => console.error('Failed to send admin notification:', err))
@@ -240,16 +245,16 @@ export async function POST(request: NextRequest) {
         // Send SMS notification to admins about new employee (non-blocking)
         sendEmployeeCreatedSMS({
             employeeName: display_name || full_name,
-            email,
+            email: normalizedEmail,
             position: position || undefined,
         }).catch(err => console.error('Failed to send admin SMS notification:', err))
 
         const duration = Date.now() - startTime
-        serverLog.api('Employee created successfully', { email, duration, data: { userId } })
+        serverLog.api('Employee created successfully', { email: normalizedEmail, duration, data: { userId } })
 
         return NextResponse.json({
             success: true,
-            user: { id: userId, email }
+            user: { id: userId, email: normalizedEmail }
         })
 
     } catch (error) {

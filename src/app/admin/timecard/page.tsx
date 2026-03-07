@@ -1,8 +1,9 @@
 'use client'
 
-import { useState, useMemo, useRef } from 'react'
+import { useState, useMemo, useRef, useCallback } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { useEmployees } from '@/lib/hooks/useData'
+import { formatDate, formatDateOnly, formatTime, formatShortDateWithWeekday, formatShortDate, getTodayNY, getCurrentMonthNY, getNYMonthBoundaries, getNYDayBoundary } from '@/lib/utils'
 import { formatLocationStatus } from '@/lib/geolocation'
 import useSWR from 'swr'
 
@@ -16,14 +17,21 @@ interface TimeCardEntry {
     work_type: string
     clock_in_location_status: string | null
     clock_out_location_status: string | null
+    clock_in_lat: number | null
+    clock_in_lng: number | null
+    clock_out_lat: number | null
+    clock_out_lng: number | null
+    clock_in_location_name: string | null
+    clock_out_location_name: string | null
     notes: string | null
     late_flag: boolean
     early_checkout_flag: boolean
+    actual_clock_out: string | null
+    late_clock_out_minutes: number | null
     employee?: {
         id: string
         display_name: string | null
         position: string | null
-        hourly_rate: number | null
         profiles?: {
             full_name: string | null
             email: string | null
@@ -35,15 +43,11 @@ interface Employee {
     id: string
     display_name: string | null
     position: string | null
-    hourly_rate: number | null
     profiles: {
         full_name: string | null
         email: string | null
     } | null
 }
-
-// Get hourly rate from environment
-const DEFAULT_HOURLY_RATE = parseFloat(process.env.NEXT_PUBLIC_HOURLY_RATE || '15.00')
 
 function escapeHtml(str: string): string {
     return str
@@ -54,6 +58,27 @@ function escapeHtml(str: string): string {
         .replace(/'/g, '&#39;')
 }
 
+// In-memory geocode cache shared across fetcher calls
+const geocodeCache = new Map<string, string>()
+
+async function resolveLocation(lat: number | null, lng: number | null): Promise<string | null> {
+    if (lat == null || lng == null) return null
+    const key = `${lat.toFixed(3)},${lng.toFixed(3)}`
+    if (geocodeCache.has(key)) return geocodeCache.get(key)!
+    try {
+        const res = await fetch(`/api/geocode?lat=${lat}&lng=${lng}`)
+        if (!res.ok) throw new Error('failed')
+        const data = await res.json()
+        const label = data.location || `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        geocodeCache.set(key, label)
+        return label
+    } catch {
+        const fallback = `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        geocodeCache.set(key, fallback)
+        return fallback
+    }
+}
+
 export default function AdminTimeCardPage() {
     const { data: employees = [] } = useEmployees(true) as { data: Employee[] }
     const tableRef = useRef<HTMLDivElement>(null)
@@ -61,18 +86,136 @@ export default function AdminTimeCardPage() {
     // Filters
     const [employeeFilter, setEmployeeFilter] = useState<string>('all')
     const [filterType, setFilterType] = useState<'month' | 'range'>('month')
-    const [selectedMonth, setSelectedMonth] = useState(() => {
-        const now = new Date()
-        return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-    })
+    const [selectedMonth, setSelectedMonth] = useState(() => getCurrentMonthNY())
     const [dateRange, setDateRange] = useState(() => {
-        const now = new Date()
-        const firstDay = new Date(now.getFullYear(), now.getMonth(), 1)
-        return {
-            start: firstDay.toISOString().slice(0, 10),
-            end: now.toISOString().slice(0, 10),
-        }
+        const today = getTodayNY()
+        const firstDay = today.slice(0, 8) + '01'
+        return { start: firstDay, end: today }
     })
+
+    // Edit modal state
+    const [editingEntry, setEditingEntry] = useState<TimeCardEntry | null>(null)
+    const [editClockIn, setEditClockIn] = useState('')
+    const [editClockOut, setEditClockOut] = useState('')
+    const [savingEdit, setSavingEdit] = useState(false)
+    const [editError, setEditError] = useState('')
+
+    // Convert ISO string to datetime-local value in NY timezone
+    function isoToDatetimeLocal(iso: string): string {
+        const d = new Date(iso)
+        const ny = new Date(d.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+        const year = ny.getFullYear()
+        const month = String(ny.getMonth() + 1).padStart(2, '0')
+        const day = String(ny.getDate()).padStart(2, '0')
+        const hours = String(ny.getHours()).padStart(2, '0')
+        const minutes = String(ny.getMinutes()).padStart(2, '0')
+        return `${year}-${month}-${day}T${hours}:${minutes}`
+    }
+
+    // Convert datetime-local value (interpreted as NY time) back to UTC ISO string
+    function datetimeLocalToISO(dtLocal: string): string {
+        // dtLocal is "YYYY-MM-DDTHH:mm"
+        // We need to interpret this as NY time and convert to UTC
+        const formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: false,
+        })
+        // Create a date assuming local browser time, then adjust
+        const [datePart, timePart] = dtLocal.split('T')
+        const [year, month, day] = datePart.split('-').map(Number)
+        const [hours, minutes] = timePart.split(':').map(Number)
+
+        // Use a brute-force approach: try the date and adjust for NY offset
+        const guess = new Date(Date.UTC(year, month - 1, day, hours, minutes, 0))
+        // Format that guess in NY to see what NY time it corresponds to
+        const parts = formatter.formatToParts(guess)
+        const getPart = (type: string) => Number(parts.find(p => p.type === type)?.value || 0)
+        const nyHour = getPart('hour')
+        const nyMinute = getPart('minute')
+        const nyDay = getPart('day')
+        // Calculate the offset between what we want and what we got
+        const wantedMinutes = hours * 60 + minutes
+        const gotMinutes = nyHour * 60 + nyMinute
+        let diffMinutes = wantedMinutes - gotMinutes
+        // Handle day boundary crossings
+        if (day !== nyDay) {
+            if (day > nyDay) diffMinutes += 24 * 60
+            else diffMinutes -= 24 * 60
+        }
+        return new Date(guess.getTime() + diffMinutes * 60000).toISOString()
+    }
+
+    const openEditModal = useCallback((entry: TimeCardEntry) => {
+        setEditingEntry(entry)
+        setEditClockIn(isoToDatetimeLocal(entry.clock_in))
+        setEditClockOut(entry.clock_out ? isoToDatetimeLocal(entry.clock_out) : '')
+        setEditError('')
+    }, [])
+
+    const closeEditModal = useCallback(() => {
+        setEditingEntry(null)
+        setEditClockIn('')
+        setEditClockOut('')
+        setEditError('')
+        setSavingEdit(false)
+    }, [])
+
+    // Calculate preview hours for the edit modal
+    const editPreviewHours = useMemo(() => {
+        if (!editClockIn || !editClockOut || !editingEntry) return null
+        const inDate = new Date(datetimeLocalToISO(editClockIn))
+        const outDate = new Date(datetimeLocalToISO(editClockOut))
+        if (isNaN(inDate.getTime()) || isNaN(outDate.getTime())) return null
+        if (outDate <= inDate) return null
+        const diffMs = outDate.getTime() - inDate.getTime()
+        const breakMin = editingEntry.break_minutes || 0
+        const hours = diffMs / 3600000 - breakMin / 60
+        return Math.max(0, hours)
+    }, [editClockIn, editClockOut, editingEntry])
+
+    async function handleSaveEdit() {
+        if (!editingEntry || !editClockIn) return
+        setEditError('')
+
+        const clockInISO = datetimeLocalToISO(editClockIn)
+        const clockOutISO = editClockOut ? datetimeLocalToISO(editClockOut) : null
+
+        // Client-side validation
+        if (clockOutISO) {
+            const inD = new Date(clockInISO)
+            const outD = new Date(clockOutISO)
+            if (outD <= inD) {
+                setEditError('Clock-out must be after clock-in')
+                return
+            }
+        }
+
+        setSavingEdit(true)
+        try {
+            const res = await fetch('/api/admin/attendance', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: editingEntry.id,
+                    clock_in: clockInISO,
+                    clock_out: clockOutISO,
+                }),
+            })
+            const data = await res.json()
+            if (!res.ok) {
+                setEditError(data.error || 'Failed to save')
+                return
+            }
+            closeEditModal()
+            refreshData()
+        } catch {
+            setEditError('Failed to save changes')
+        } finally {
+            setSavingEdit(false)
+        }
+    }
 
     // Fetch time card data based on filters
     const filterKey = useMemo(() =>
@@ -90,12 +233,12 @@ export default function AdminTimeCardPage() {
             let endDate: string
 
             if (filterType === 'month') {
-                const [year, month] = selectedMonth.split('-').map(Number)
-                startDate = new Date(year, month - 1, 1).toISOString()
-                endDate = new Date(year, month, 0, 23, 59, 59, 999).toISOString()
+                const boundaries = getNYMonthBoundaries(selectedMonth)
+                startDate = boundaries.start
+                endDate = boundaries.end
             } else {
-                startDate = `${dateRange.start}T00:00:00.000Z`
-                endDate = `${dateRange.end}T23:59:59.999Z`
+                startDate = getNYDayBoundary(dateRange.start, 'start')
+                endDate = getNYDayBoundary(dateRange.end, 'end')
             }
 
             let query = supabase
@@ -110,14 +253,19 @@ export default function AdminTimeCardPage() {
                     work_type,
                     clock_in_location_status,
                     clock_out_location_status,
+                    clock_in_lat,
+                    clock_in_lng,
+                    clock_out_lat,
+                    clock_out_lng,
                     notes,
                     late_flag,
                     early_checkout_flag,
+                    actual_clock_out,
+                    late_clock_out_minutes,
                     employee:employees (
                         id,
                         display_name,
                         position,
-                        hourly_rate,
                         profiles (
                             full_name,
                             email
@@ -136,34 +284,42 @@ export default function AdminTimeCardPage() {
 
             if (error) {
                 console.error('Error fetching time card data:', error)
-                return { entries: [], totals: { totalHours: 0, totalOT: 0, totalBreak: 0, totalEarned: 0, daysWorked: 0 } }
+                return { entries: [], totals: { totalHours: 0, totalBreak: 0, daysWorked: 0 } }
             }
 
-            const entries = (data || []) as TimeCardEntry[]
+            const rawEntries = (data || []) as TimeCardEntry[]
+
+            // Resolve location names inside the fetcher (no useEffect needed)
+            const entries = await Promise.all(rawEntries.map(async (entry) => {
+                const clockInName = entry.clock_in_location_status === 'captured'
+                    ? await resolveLocation(entry.clock_in_lat, entry.clock_in_lng)
+                    : null
+                const clockOutName = entry.clock_out_location_status === 'captured'
+                    ? await resolveLocation(entry.clock_out_lat, entry.clock_out_lng)
+                    : null
+                return {
+                    ...entry,
+                    clock_in_location_name: clockInName,
+                    clock_out_location_name: clockOutName,
+                }
+            }))
 
             // Calculate totals
             let totalHours = 0
-            let totalOT = 0
             let totalBreak = 0
-            let totalEarned = 0
 
             entries.forEach((entry) => {
                 const hours = entry.total_hours || 0
-                const rate = entry.employee?.hourly_rate || DEFAULT_HOURLY_RATE
                 totalHours += hours
-                if (hours > 8) totalOT += hours - 8
                 totalBreak += entry.break_minutes || 0
-                totalEarned += hours * rate
             })
 
             return {
                 entries,
                 totals: {
                     totalHours,
-                    totalOT,
                     totalBreak,
-                    totalEarned,
-                    daysWorked: entries.filter((e) => e.clock_out).length,
+                    daysWorked: new Set(entries.filter((e) => e.clock_out).map((e) => formatDate(e.clock_in))).size,
                 }
             }
         },
@@ -172,7 +328,7 @@ export default function AdminTimeCardPage() {
 
     const timeCardEntries = timeCardData?.entries || []
     const monthlyTotals = timeCardData?.totals || {
-        totalHours: 0, totalOT: 0, totalBreak: 0, totalEarned: 0, daysWorked: 0
+        totalHours: 0, totalBreak: 0, daysWorked: 0
     }
 
     // Format hours to readable format
@@ -184,9 +340,13 @@ export default function AdminTimeCardPage() {
         return `${h}h ${m}m`
     }
 
-    // Format currency
-    function formatCurrency(amount: number): string {
-        return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount)
+    // Helper to render a location value
+    function renderLocation(status: string | null, name: string | null) {
+        if (name) {
+            return <span className="text-green-600">{name}</span>
+        }
+        const loc = formatLocationStatus(status)
+        return <span className={loc.color}>{loc.icon ? `${loc.icon} ` : ''}{loc.text}</span>
     }
 
     // Export to CSV
@@ -194,42 +354,33 @@ export default function AdminTimeCardPage() {
         const csvCell = (val: string) => `"${val.replace(/"/g, '""')}"`
         const csvRow = (cells: string[]) => cells.map(csvCell).join(',')
 
-        const headers = ['Employee', 'Date', 'Status', 'Type', 'Clock In', 'Clock Out', 'OT', 'Break', 'Hours', 'Rate', 'Earned', 'Location']
+        const headers = ['Employee', 'Date', 'Status', 'Type', 'Clock In', 'Clock Out', 'Actual Clock Out', 'Late Out (min)', 'Break', 'Hours', 'Clock In Location', 'Clock Out Location']
         const rows = timeCardEntries.map(entry => {
             const hours = entry.total_hours || 0
-            const ot = hours > 8 ? hours - 8 : 0
-            const rate = entry.employee?.hourly_rate || DEFAULT_HOURLY_RATE
-            const earned = hours * rate
-            const clockInDate = new Date(entry.clock_in)
-            const clockOutDate = entry.clock_out ? new Date(entry.clock_out) : null
-            const locationIn = formatLocationStatus(entry.clock_in_location_status)
             const empName = entry.employee?.display_name || entry.employee?.profiles?.full_name || 'Unknown'
 
             return csvRow([
                 empName,
-                clockInDate.toLocaleDateString(),
+                formatShortDate(entry.clock_in),
                 entry.clock_out ? 'Complete' : 'In Progress',
                 entry.work_type || 'Regular',
-                clockInDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }),
-                clockOutDate ? clockOutDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : '-',
-                formatHours(ot),
+                formatTime(entry.clock_in),
+                entry.clock_out ? formatTime(entry.clock_out) : '-',
+                entry.actual_clock_out ? formatTime(entry.actual_clock_out) : '',
+                entry.late_clock_out_minutes ? entry.late_clock_out_minutes.toString() : '',
                 `${entry.break_minutes || 0}m`,
                 formatHours(hours),
-                formatCurrency(rate),
-                formatCurrency(earned),
-                locationIn.text,
+                entry.clock_in_location_name || formatLocationStatus(entry.clock_in_location_status).text,
+                entry.clock_out_location_name || formatLocationStatus(entry.clock_out_location_status).text,
             ])
         })
 
         rows.push('')
         rows.push(csvRow([
-            'TOTALS', '', '', '', '', '',
-            formatHours(monthlyTotals.totalOT),
+            'TOTALS', '', '', '', '', '', '', '',
             `${monthlyTotals.totalBreak}m`,
             formatHours(monthlyTotals.totalHours),
-            '',
-            formatCurrency(monthlyTotals.totalEarned),
-            '',
+            '', '',
         ]))
 
         const csvContent = [csvRow(headers), ...rows].join('\n')
@@ -257,11 +408,9 @@ export default function AdminTimeCardPage() {
         let periodLabel: string
         if (filterType === 'month') {
             const [year, month] = selectedMonth.split('-').map(Number)
-            periodLabel = new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+            periodLabel = new Date(year, month - 1, 1).toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', year: 'numeric' })
         } else {
-            const startDate = new Date(dateRange.start)
-            const endDate = new Date(dateRange.end)
-            periodLabel = `${startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} - ${endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+            periodLabel = `${formatDateOnly(dateRange.start)} - ${formatDateOnly(dateRange.end)}`
         }
         const selectedEmp = employeeFilter !== 'all' ? employees.find(e => e.id === employeeFilter) : null
         const empName = selectedEmp ? (selectedEmp.display_name || selectedEmp.profiles?.full_name || 'Unknown') : 'All Employees'
@@ -288,7 +437,7 @@ export default function AdminTimeCardPage() {
                 <div class="meta">
                     <strong>Employee:</strong> ${escapeHtml(empName)}<br>
                     <strong>Period:</strong> ${periodLabel}<br>
-                    <strong>Generated:</strong> ${new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })} ${new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}
+                    <strong>Generated:</strong> ${new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York', year: 'numeric', month: 'short', day: 'numeric' })} ${new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: true })}
                 </div>
                 ${printContent.innerHTML}
                 <div class="footer">PlayFunia Employee Management System</div>
@@ -423,7 +572,7 @@ export default function AdminTimeCardPage() {
             </div>
 
             {/* Summary Cards */}
-            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+            <div className="grid grid-cols-3 gap-3">
                 <div className="card p-4 bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-900/20 dark:to-blue-800/20 border-blue-200 dark:border-blue-800">
                     <p className="text-xs font-medium text-blue-600 dark:text-blue-400 uppercase tracking-wide">Days Worked</p>
                     <p className="text-2xl font-bold text-blue-900 dark:text-blue-100 mt-1">{monthlyTotals.daysWorked}</p>
@@ -432,19 +581,83 @@ export default function AdminTimeCardPage() {
                     <p className="text-xs font-medium text-green-600 dark:text-green-400 uppercase tracking-wide">Total Hours</p>
                     <p className="text-2xl font-bold text-green-900 dark:text-green-100 mt-1">{formatHours(monthlyTotals.totalHours)}</p>
                 </div>
-                <div className="card p-4 bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-900/20 dark:to-orange-800/20 border-orange-200 dark:border-orange-800">
-                    <p className="text-xs font-medium text-orange-600 dark:text-orange-400 uppercase tracking-wide">Overtime</p>
-                    <p className="text-2xl font-bold text-orange-900 dark:text-orange-100 mt-1">{formatHours(monthlyTotals.totalOT)}</p>
-                </div>
                 <div className="card p-4 bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-800/50 dark:to-gray-700/50 border-gray-200 dark:border-gray-700">
                     <p className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wide">Break Time</p>
                     <p className="text-2xl font-bold text-gray-900 dark:text-gray-100 mt-1">{monthlyTotals.totalBreak}m</p>
                 </div>
-                <div className="card p-4 bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-900/20 dark:to-purple-800/20 border-purple-200 dark:border-purple-800 col-span-2 lg:col-span-1">
-                    <p className="text-xs font-medium text-purple-600 dark:text-purple-400 uppercase tracking-wide">Total Earned</p>
-                    <p className="text-2xl font-bold text-purple-900 dark:text-purple-100 mt-1">{formatCurrency(monthlyTotals.totalEarned)}</p>
-                </div>
             </div>
+
+            {/* Edit Modal */}
+            {editingEntry && (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={closeEditModal}>
+                    <div className="bg-background rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+                        <div className="p-5">
+                            <h3 className="text-lg font-semibold mb-1">Edit Attendance Time</h3>
+                            <p className="text-sm text-muted-foreground mb-4">
+                                {editingEntry.employee?.display_name || editingEntry.employee?.profiles?.full_name || 'Unknown'} &mdash; {formatShortDateWithWeekday(editingEntry.clock_in)}
+                            </p>
+
+                            {editError && (
+                                <div className="mb-3 p-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded text-sm text-red-700 dark:text-red-300">
+                                    {editError}
+                                </div>
+                            )}
+
+                            <div className="space-y-3">
+                                <div>
+                                    <label className="block text-sm font-medium mb-1">Clock In</label>
+                                    <input
+                                        type="datetime-local"
+                                        value={editClockIn}
+                                        onChange={(e) => setEditClockIn(e.target.value)}
+                                        className="input w-full"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-medium mb-1">Clock Out</label>
+                                    <input
+                                        type="datetime-local"
+                                        value={editClockOut}
+                                        onChange={(e) => setEditClockOut(e.target.value)}
+                                        className="input w-full"
+                                    />
+                                    <p className="text-xs text-muted-foreground mt-1">Leave empty for in-progress entries</p>
+                                </div>
+                                {editPreviewHours !== null && (
+                                    <div className="p-2 bg-muted rounded text-sm">
+                                        Calculated hours: <span className="font-semibold">{formatHours(editPreviewHours)}</span>
+                                        {editingEntry.break_minutes > 0 && (
+                                            <span className="text-muted-foreground"> (after {editingEntry.break_minutes}m break)</span>
+                                        )}
+                                    </div>
+                                )}
+                                {editClockOut && editClockIn && editPreviewHours === null && (
+                                    <div className="p-2 bg-red-50 dark:bg-red-900/20 rounded text-sm text-red-600 dark:text-red-400">
+                                        Clock-out must be after clock-in
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex justify-end gap-2 mt-5">
+                                <button
+                                    onClick={closeEditModal}
+                                    className="btn-ghost"
+                                    disabled={savingEdit}
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={handleSaveEdit}
+                                    className="btn-primary"
+                                    disabled={savingEdit || !editClockIn}
+                                >
+                                    {savingEdit ? 'Saving...' : 'Save'}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Time Card Table */}
             <div className="card overflow-hidden" ref={tableRef}>
@@ -475,32 +688,23 @@ export default function AdminTimeCardPage() {
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Type</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Clock In</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Clock Out</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">OT</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Break</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Hours</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Rate</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Earned</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Location</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border">
                                 {timeCardEntries.map((entry, index) => {
-                                    const clockInDate = new Date(entry.clock_in)
-                                    const clockOutDate = entry.clock_out ? new Date(entry.clock_out) : null
                                     const hours = entry.total_hours || 0
-                                    const ot = hours > 8 ? hours - 8 : 0
-                                    const rate = entry.employee?.hourly_rate || DEFAULT_HOURLY_RATE
-                                    const earned = hours * rate
-                                    const locationIn = formatLocationStatus(entry.clock_in_location_status)
                                     const empName = entry.employee?.display_name || entry.employee?.profiles?.full_name || 'Unknown'
 
                                     return (
-                                        <tr key={entry.id} className={`${index % 2 === 0 ? 'bg-background' : 'bg-muted/30'} hover:bg-muted/50 transition-colors`}>
+                                        <tr key={entry.id} className={`group ${index % 2 === 0 ? 'bg-background' : 'bg-muted/30'} hover:bg-muted/50 transition-colors`}>
                                             {employeeFilter === 'all' && (
                                                 <td className="px-4 py-3 text-sm font-medium">{empName}</td>
                                             )}
                                             <td className="px-4 py-3 text-sm font-medium">
-                                                {clockInDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                                                {formatShortDateWithWeekday(entry.clock_in)}
                                             </td>
                                             <td className="px-4 py-3">
                                                 <span className={`px-2 py-1 rounded-full text-xs font-medium ${
@@ -512,28 +716,57 @@ export default function AdminTimeCardPage() {
                                                 </span>
                                             </td>
                                             <td className="px-4 py-3 text-sm capitalize">{entry.work_type || 'Regular'}</td>
-                                            <td className="px-4 py-3 text-sm font-mono">{clockInDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}</td>
-                                            <td className="px-4 py-3 text-sm font-mono">{clockOutDate ? clockOutDate.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true }) : '-'}</td>
-                                            <td className="px-4 py-3 text-sm">
-                                                {ot > 0 ? (
-                                                    <span className="text-orange-600 dark:text-orange-400 font-medium">{formatHours(ot)}</span>
-                                                ) : '-'}
+                                            <td className="px-4 py-3 text-sm font-mono">
+                                                <span className="inline-flex items-center gap-1">
+                                                    {formatTime(entry.clock_in)}
+                                                    <button
+                                                        onClick={() => openEditModal(entry)}
+                                                        className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted print:hidden"
+                                                        title="Edit times"
+                                                    >
+                                                        <svg className="w-3.5 h-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                                        </svg>
+                                                    </button>
+                                                </span>
+                                            </td>
+                                            <td className="px-4 py-3 text-sm font-mono">
+                                                <span className="inline-flex items-center gap-1">
+                                                    {entry.clock_out ? formatTime(entry.clock_out) : '-'}
+                                                    <button
+                                                        onClick={() => openEditModal(entry)}
+                                                        className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted print:hidden"
+                                                        title="Edit times"
+                                                    >
+                                                        <svg className="w-3.5 h-3.5 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                                                        </svg>
+                                                    </button>
+                                                </span>
+                                                {entry.actual_clock_out && (
+                                                    <div className="text-xs text-muted-foreground font-sans">
+                                                        Actual: {formatTime(entry.actual_clock_out)}
+                                                        {entry.late_clock_out_minutes && (
+                                                            <span className="ml-1 text-amber-600 dark:text-amber-400">
+                                                                (+{entry.late_clock_out_minutes}m)
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                )}
                                             </td>
                                             <td className="px-4 py-3 text-sm">{entry.break_minutes || 0}m</td>
                                             <td className="px-4 py-3 text-sm font-semibold">{formatHours(hours)}</td>
-                                            <td className="px-4 py-3 text-sm">{formatCurrency(rate)}</td>
-                                            <td className="px-4 py-3 text-sm font-semibold text-green-600 dark:text-green-400">{formatCurrency(earned)}</td>
-                                            <td className="px-4 py-3">
-                                                <span className={`text-xs font-medium ${locationIn.color}`}>
-                                                    {locationIn.text === 'GPS' ? (
-                                                        <span className="flex items-center gap-1">
-                                                            <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                                                                <path fillRule="evenodd" d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z" clipRule="evenodd" />
-                                                            </svg>
-                                                            GPS
-                                                        </span>
-                                                    ) : locationIn.text}
-                                                </span>
+                                            <td className="px-4 py-3 text-sm">
+                                                <div className="flex flex-col gap-0.5">
+                                                    <div>
+                                                        <span className="text-xs font-medium text-muted-foreground">In: </span>
+                                                        {renderLocation(entry.clock_in_location_status, entry.clock_in_location_name)}
+                                                    </div>
+                                                    <div>
+                                                        <span className="text-xs font-medium text-muted-foreground">Out: </span>
+                                                        {renderLocation(entry.clock_out_location_status, entry.clock_out_location_name)}
+                                                    </div>
+                                                </div>
                                             </td>
                                         </tr>
                                     )
@@ -542,11 +775,8 @@ export default function AdminTimeCardPage() {
                             <tfoot>
                                 <tr className="bg-primary/10 font-semibold">
                                     <td colSpan={employeeFilter === 'all' ? 6 : 5} className="px-4 py-3 text-sm">TOTALS</td>
-                                    <td className="px-4 py-3 text-sm text-orange-600 dark:text-orange-400">{formatHours(monthlyTotals.totalOT)}</td>
                                     <td className="px-4 py-3 text-sm">{monthlyTotals.totalBreak}m</td>
                                     <td className="px-4 py-3 text-sm font-bold">{formatHours(monthlyTotals.totalHours)}</td>
-                                    <td className="px-4 py-3 text-sm">-</td>
-                                    <td className="px-4 py-3 text-sm font-bold text-green-600 dark:text-green-400">{formatCurrency(monthlyTotals.totalEarned)}</td>
                                     <td className="px-4 py-3 text-sm">-</td>
                                 </tr>
                             </tfoot>

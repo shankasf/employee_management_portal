@@ -1,11 +1,13 @@
 'use client'
 
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { useEmployees, invalidateQueries } from '@/lib/hooks/useData'
+import { useAuth } from '@/contexts/AuthContext'
 import { IdDocumentType } from '@/types/supabase'
 import { logFormSubmit } from '@/lib/usage-log'
-import { getSignedStorageUrl, formatTimeString } from '@/lib/utils'
+import { logValidationRejection, startUpload } from '@/lib/upload-logger'
+import { getSignedStorageUrl, getPublicProfilePicUrl, formatTimeString } from '@/lib/utils'
 
 interface Employee {
     id: string
@@ -92,23 +94,10 @@ const defaultEditFormData = {
     is_active: true
 }
 
-// Component to display profile picture with signed URL
+// Component to display profile picture with public URL (no signing needed)
 function ProfilePicture({ url, name, size = 'md' }: { url: string | null, name: string, size?: 'sm' | 'md' | 'lg' }) {
-    const [signedUrl, setSignedUrl] = useState<string | null>(null)
-    const [loading, setLoading] = useState(!!url)
-
-    useEffect(() => {
-        if (url) {
-            setLoading(true)
-            getSignedStorageUrl(url, 'employee-docs').then((signed) => {
-                setSignedUrl(signed)
-                setLoading(false)
-            })
-        } else {
-            setSignedUrl(null)
-            setLoading(false)
-        }
-    }, [url])
+    const [hasError, setHasError] = useState(false)
+    const publicUrl = getPublicProfilePicUrl(url)
 
     const sizeClasses = {
         sm: 'w-8 h-8 text-sm',
@@ -116,19 +105,13 @@ function ProfilePicture({ url, name, size = 'md' }: { url: string | null, name: 
         lg: 'w-16 h-16 text-xl'
     }
 
-    if (loading) {
-        return (
-            <div className={`${sizeClasses[size]} rounded-full bg-muted animate-pulse flex-shrink-0`} />
-        )
-    }
-
-    if (signedUrl) {
+    if (publicUrl && !hasError) {
         return (
             <img
-                src={signedUrl}
+                src={publicUrl}
                 alt={name}
                 className={`${sizeClasses[size]} rounded-full object-cover flex-shrink-0`}
-                onError={() => setSignedUrl(null)}
+                onError={() => setHasError(true)}
             />
         )
     }
@@ -181,6 +164,7 @@ function ViewIdDocument({ url }: { url: string }) {
 export default function EmployeesPage() {
     // Always show all employees including inactive ones
     const { data: employees = [], isLoading: loading, mutate } = useEmployees(true)
+    const { user, refreshProfile } = useAuth()
     const [showModal, setShowModal] = useState(false)
     const [showEditModal, setShowEditModal] = useState(false)
     const [showViewModal, setShowViewModal] = useState(false)
@@ -197,6 +181,19 @@ export default function EmployeesPage() {
     const [deleteType, setDeleteType] = useState<'deactivate' | 'permanent'>('deactivate')
     const [deleteConfirmed, setDeleteConfirmed] = useState(false)
     const [deleting, setDeleting] = useState(false)
+
+    // Search
+    const [searchQuery, setSearchQuery] = useState('')
+    const filteredEmployees = useMemo(() => {
+        if (!searchQuery.trim()) return employees as Employee[]
+        const q = searchQuery.toLowerCase()
+        return (employees as Employee[]).filter(emp =>
+            (emp.display_name?.toLowerCase().includes(q)) ||
+            (emp.profiles?.full_name?.toLowerCase().includes(q)) ||
+            (emp.profiles?.email?.toLowerCase().includes(q)) ||
+            (emp.position?.toLowerCase().includes(q))
+        )
+    }, [employees, searchQuery])
 
     // Password visibility
     const [showPassword, setShowPassword] = useState(false)
@@ -225,10 +222,12 @@ export default function EmployeesPage() {
         if (file) {
             const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'application/pdf']
             if (!validTypes.includes(file.type)) {
+                logValidationRejection(file, 'Invalid file type for ID document', 'admin_id_doc', 'employee-docs')
                 alert('Please select an image (JPG, PNG, GIF, WebP) or PDF file')
                 return
             }
             if (file.size > 10 * 1024 * 1024) { // 10MB limit
+                logValidationRejection(file, 'File exceeds 10MB limit', 'admin_id_doc', 'employee-docs')
                 alert('File must be less than 10MB')
                 return
             }
@@ -252,6 +251,7 @@ export default function EmployeesPage() {
 
     // Upload ID document file to Supabase storage
     async function uploadIdDoc(file: File, employeeId: string): Promise<string | null> {
+        const tracker = startUpload(file, 'employee-docs', 'admin_id_doc', employeeId)
         const supabase = createUntypedClient()
         const fileExt = file.name.split('.').pop()
         const fileName = `id_doc_${employeeId}_${Date.now()}.${fileExt}`
@@ -267,6 +267,7 @@ export default function EmployeesPage() {
             })
 
         if (uploadError) {
+            tracker.failure(uploadError)
             console.error('Error uploading ID document:', uploadError)
             if (uploadError.message?.includes('Bucket not found')) {
                 console.warn('Storage bucket not configured - skipping upload')
@@ -275,6 +276,7 @@ export default function EmployeesPage() {
             throw uploadError
         }
 
+        tracker.success(filePath)
         return filePath
     }
 
@@ -284,10 +286,12 @@ export default function EmployeesPage() {
         if (file) {
             const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
             if (!validTypes.includes(file.type)) {
+                logValidationRejection(file, 'Invalid image type for profile picture', 'admin_profile_pic', 'profile-pictures')
                 alert('Please select an image file (JPG, PNG, GIF, WebP)')
                 return
             }
             if (file.size > 5 * 1024 * 1024) { // 5MB limit
+                logValidationRejection(file, 'File exceeds 5MB limit', 'admin_profile_pic', 'profile-pictures')
                 alert('Image must be less than 5MB')
                 return
             }
@@ -301,23 +305,25 @@ export default function EmployeesPage() {
         }
     }
 
-    // Upload profile picture to Supabase storage
+    // Upload profile picture to public bucket (no signed URLs needed)
     async function uploadProfilePic(file: File, employeeId: string): Promise<string | null> {
+        const tracker = startUpload(file, 'profile-pictures', 'admin_profile_pic', employeeId)
         const supabase = createUntypedClient()
-        const fileExt = file.name.split('.').pop()
+        const mimeToExt: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' }
+        const fileExt = mimeToExt[file.type] || file.name.split('.').pop() || 'jpg'
         const fileName = `profile_${employeeId}_${Date.now()}.${fileExt}`
-        const filePath = `profile-pictures/${fileName}`
 
         setUploadProgress('Uploading profile picture...')
 
         const { error: uploadError } = await supabase.storage
-            .from('employee-docs')
-            .upload(filePath, file, {
+            .from('profile-pictures')
+            .upload(fileName, file, {
                 cacheControl: '3600',
                 upsert: true
             })
 
         if (uploadError) {
+            tracker.failure(uploadError)
             console.error('Error uploading profile picture:', uploadError)
             if (uploadError.message?.includes('Bucket not found')) {
                 console.warn('Storage bucket not configured - skipping upload')
@@ -326,7 +332,8 @@ export default function EmployeesPage() {
             throw uploadError
         }
 
-        return filePath
+        tracker.success(fileName)
+        return fileName
     }
 
     function openEditModal(emp: Employee) {
@@ -355,12 +362,8 @@ export default function EmployeesPage() {
             role: emp.profiles?.role || 'employee',
             is_active: emp.is_active
         })
-        // Load existing profile picture
-        if (emp.profile_picture_url) {
-            getSignedStorageUrl(emp.profile_picture_url, 'employee-docs').then(setExistingProfilePicUrl)
-        } else {
-            setExistingProfilePicUrl(null)
-        }
+        // Load existing profile picture (public URL, no signing needed)
+        setExistingProfilePicUrl(getPublicProfilePicUrl(emp.profile_picture_url))
         setEditProfilePicFile(null)
         setEditProfilePicPreview(null)
         setActiveTab('basic')
@@ -517,6 +520,10 @@ export default function EmployeesPage() {
             logFormSubmit('Edit Employee', 'employee', true, { employeeId: editingEmployee.id })
             alert('Employee updated successfully!')
             setShowEditModal(false)
+            // If editing own profile, refresh AuthContext so sidebar pic updates
+            if (editingEmployee.id === user?.id) {
+                refreshProfile()
+            }
             setEditingEmployee(null)
             invalidateQueries.employees()
             mutate()
@@ -661,6 +668,30 @@ export default function EmployeesPage() {
                         + Add Employee
                     </button>
                 </div>
+            </div>
+
+            {/* Search Bar */}
+            <div className="relative">
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input
+                    type="text"
+                    placeholder="Search by name, email, or position..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="input pl-10 w-full"
+                />
+                {searchQuery && (
+                    <button
+                        onClick={() => setSearchQuery('')}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                )}
             </div>
 
             {/* Add Employee Modal */}
@@ -1496,15 +1527,17 @@ export default function EmployeesPage() {
                         <div key={i} className="h-16 sm:h-20 bg-muted rounded-lg animate-pulse"></div>
                     ))}
                 </div>
-            ) : employees.length === 0 ? (
+            ) : filteredEmployees.length === 0 ? (
                 <div className="card p-6 sm:p-8 text-center">
-                    <p className="text-muted-foreground text-sm sm:text-base">No employees found</p>
+                    <p className="text-muted-foreground text-sm sm:text-base">
+                        {searchQuery ? 'No employees match your search' : 'No employees found'}
+                    </p>
                 </div>
             ) : (
                 <>
                     {/* Mobile Card View */}
                     <div className="block sm:hidden space-y-3">
-                        {employees.map((emp: Employee) => (
+                        {filteredEmployees.map((emp: Employee) => (
                             <div key={emp.id} className="card p-4" onClick={() => openViewModal(emp)}>
                                 <div className="flex items-start gap-3">
                                     <ProfilePicture
@@ -1563,7 +1596,7 @@ export default function EmployeesPage() {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y">
-                                    {employees.map((emp: Employee) => (
+                                    {filteredEmployees.map((emp: Employee) => (
                                         <tr key={emp.id} className="hover:bg-muted/30 cursor-pointer" onClick={() => openViewModal(emp)}>
                                             <td className="p-3 sm:p-4">
                                                 <div className="flex items-center gap-3">

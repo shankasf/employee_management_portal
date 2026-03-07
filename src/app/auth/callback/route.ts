@@ -67,7 +67,7 @@ export async function GET(request: NextRequest) {
       const { data: profile, error: profileError } = await serviceClient
         .from('profiles')
         .select('id, role')
-        .eq('email', session.user.email)
+        .eq('email', session.user.email.toLowerCase())
         .single();
 
       if (profileError || !profile) {

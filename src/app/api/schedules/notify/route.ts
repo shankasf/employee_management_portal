@@ -16,7 +16,7 @@ import {
   sendAdminCancelledSMS,
   sendScheduleDeletedSMS,
 } from '@/lib/sms'
-import { formatDate, formatTimeString } from '@/lib/utils'
+import { formatDateOnly, formatTimeString } from '@/lib/utils'
 
 type NotificationType =
   | 'schedule_assigned'
@@ -95,12 +95,7 @@ export async function POST(request: NextRequest) {
     // For employee-initiated actions, verify the requesting user owns this schedule
     const employeeOnlyTypes: NotificationType[] = ['schedule_confirmed', 'cancellation_requested']
     if (employeeOnlyTypes.includes(type)) {
-      const { data: empRecord } = await supabase
-        .from('employees')
-        .select('id')
-        .eq('profile_id', user.id)
-        .single()
-      if (!empRecord || (empRecord as { id: string }).id !== scheduleData.employee_id) {
+      if (user.id !== scheduleData.employee_id) {
         return NextResponse.json({ error: 'Forbidden - Not your schedule' }, { status: 403 })
       }
     }
@@ -109,7 +104,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Employee email not found' }, { status: 400 })
     }
 
-    const scheduleDate = formatDate(scheduleData.schedule_date)
+    const scheduleDate = formatDateOnly(scheduleData.schedule_date)
     const startTime = formatTimeString(scheduleData.start_time)
     const endTime = formatTimeString(scheduleData.end_time)
 

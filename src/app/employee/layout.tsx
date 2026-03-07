@@ -3,9 +3,11 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useAuth } from '@/contexts/AuthContext'
-import { ReactNode, useState, useEffect } from 'react'
+import { ReactNode, useState, useEffect, useMemo, useRef } from 'react'
 import { logPageView, logButtonClick } from '@/lib/usage-log'
-import { getSignedStorageUrl } from '@/lib/utils'
+import { getPublicProfilePicUrl } from '@/lib/utils'
+import { createUntypedClient } from '@/lib/supabase/client'
+import { startUpload, logValidationRejection } from '@/lib/upload-logger'
 
 const employeeNavItems = [
     { name: 'Dashboard', href: '/employee', icon: '🏠' },
@@ -17,29 +19,20 @@ const employeeNavItems = [
 
 export default function EmployeeLayout({ children }: { children: ReactNode }) {
     const pathname = usePathname()
-    const { profile, employee, signOut, isLoading, user } = useAuth()
+    const { profile, employee, signOut, isLoading, user, refreshProfile } = useAuth()
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [signingOut, setSigningOut] = useState(false)
     const [loadingTimeout, setLoadingTimeout] = useState(false)
-    const [profilePicUrl, setProfilePicUrl] = useState<string | null>(null)
+    const [profilePicError, setProfilePicError] = useState(false)
+    const [uploadingPic, setUploadingPic] = useState(false)
+    const fileInputRef = useRef<HTMLInputElement>(null)
 
-    // Load profile picture when employee changes
-    useEffect(() => {
-        let stale = false
+    // Profile picture: public URL (no signing/expiry needed) with metadata fallback
+    const profilePicUrl = useMemo(() => {
         if (employee?.profile_picture_url) {
-            getSignedStorageUrl(employee.profile_picture_url, 'employee-docs')
-                .then(url => {
-                    if (!stale) setProfilePicUrl(url)
-                })
-                .catch(() => {
-                    if (!stale) setProfilePicUrl(null)
-                })
-        } else {
-            // Fallback to Supabase auth user metadata avatar
-            const metaAvatar = user?.user_metadata?.avatar_url || user?.user_metadata?.picture || null
-            setProfilePicUrl(metaAvatar)
+            return getPublicProfilePicUrl(employee.profile_picture_url)
         }
-        return () => { stale = true }
+        return user?.user_metadata?.avatar_url || user?.user_metadata?.picture || null
     }, [employee?.profile_picture_url, user?.user_metadata?.avatar_url, user?.user_metadata?.picture])
 
     // Log page views when route changes
@@ -59,6 +52,63 @@ export default function EmployeeLayout({ children }: { children: ReactNode }) {
     }, [isLoading])
 
     // Note: Middleware handles auth redirects - no client-side redirect needed here
+
+    const handleProfilePicUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0]
+        if (e.target) e.target.value = ''
+        if (!file || !user) return
+
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+        if (!allowedTypes.includes(file.type)) {
+            logValidationRejection(file, 'Invalid file type', 'self_profile_pic', 'profile-pictures')
+            alert('Please select an image file (JPG, PNG, GIF, or WebP).')
+            return
+        }
+        if (file.size > 5 * 1024 * 1024) {
+            logValidationRejection(file, 'File too large', 'self_profile_pic', 'profile-pictures')
+            alert('Image must be under 5MB.')
+            return
+        }
+
+        setUploadingPic(true)
+        const tracker = startUpload(file, 'profile-pictures', 'self_profile_pic', user.id)
+        try {
+            const supabase = createUntypedClient()
+            const mimeToExt: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' }
+            const fileExt = mimeToExt[file.type] || file.name.split('.').pop()?.toLowerCase() || 'jpg'
+            const fileName = `profile_${user.id}_${Date.now()}.${fileExt}`
+
+            const { error: uploadError } = await supabase.storage
+                .from('profile-pictures')
+                .upload(fileName, file, { cacheControl: '3600', upsert: true })
+
+            if (uploadError) {
+                tracker.failure(uploadError)
+                alert('Failed to upload image. Please try again.')
+                return
+            }
+
+            tracker.success(fileName)
+
+            const res = await fetch('/api/profile/picture', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ storagePath: fileName }),
+            })
+
+            if (!res.ok) {
+                alert('Failed to update profile picture. Please try again.')
+                return
+            }
+
+            setProfilePicError(false)
+            await refreshProfile()
+        } catch {
+            alert('Failed to upload image. Please try again.')
+        } finally {
+            setUploadingPic(false)
+        }
+    }
 
     const handleSignOut = async () => {
         if (signingOut) return
@@ -152,18 +202,42 @@ export default function EmployeeLayout({ children }: { children: ReactNode }) {
                     {/* User section */}
                     <div className="border-t p-3 sm:p-4">
                         <div className="flex items-center gap-3 mb-3">
-                            {profilePicUrl ? (
-                                <img
-                                    src={profilePicUrl}
-                                    alt="Profile"
-                                    className="w-9 h-9 sm:w-10 sm:h-10 rounded-full object-cover flex-shrink-0"
-                                    onError={() => setProfilePicUrl(null)}
-                                />
-                            ) : (
-                                <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold text-sm sm:text-base flex-shrink-0">
-                                    {employee?.display_name?.[0] || profile?.full_name?.[0] || 'E'}
-                                </div>
-                            )}
+                            <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept="image/jpeg,image/png,image/gif,image/webp"
+                                className="hidden"
+                                onChange={handleProfilePicUpload}
+                            />
+                            <button
+                                type="button"
+                                onClick={() => fileInputRef.current?.click()}
+                                disabled={uploadingPic}
+                                className="relative group flex-shrink-0 rounded-full focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+                                title="Change profile picture"
+                            >
+                                {profilePicUrl && !profilePicError ? (
+                                    <img
+                                        src={profilePicUrl}
+                                        alt="Profile"
+                                        className="w-9 h-9 sm:w-10 sm:h-10 rounded-full object-cover"
+                                        onError={() => setProfilePicError(true)}
+                                    />
+                                ) : (
+                                    <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-semibold text-sm sm:text-base">
+                                        {employee?.display_name?.[0] || profile?.full_name?.[0] || 'E'}
+                                    </div>
+                                )}
+                                {uploadingPic ? (
+                                    <div className="absolute inset-0 rounded-full bg-black/50 flex items-center justify-center">
+                                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                                    </div>
+                                ) : (
+                                    <div className="absolute inset-0 rounded-full bg-black/50 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                                    </div>
+                                )}
+                            </button>
                             <div className="flex-1 min-w-0">
                                 <p className="font-medium truncate text-sm sm:text-base">
                                     {employee?.display_name || profile?.full_name || 'Employee'}
