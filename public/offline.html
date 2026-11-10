@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#6366f1">
+<title>Offline · PlayFunia</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; min-height:100dvh; display:flex; align-items:center; justify-content:center;
+         font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background:#f8fafc; color:#0f172a; padding:24px; box-sizing:border-box; }
+  @media (prefers-color-scheme: dark) { body { background:#0a0a0a; color:#ededed; } p { color:#94a3b8 !important; } }
+  .box { text-align:center; max-width:320px; }
+  img { width:72px; height:72px; border-radius:18px; margin-bottom:20px; }
+  h1 { font-size:20px; margin:0 0 8px; }
+  p { color:#64748b; margin:0 0 24px; line-height:1.5; }
+  button { background:#6366f1; color:#fff; border:0; border-radius:12px; padding:14px 28px; font-size:16px; font-weight:600; width:100%; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <img src="/icons/icon-192.png" alt="">
+    <h1>You're offline</h1>
+    <p>Check your Wi-Fi or mobile data, then try again. Clocking in needs an internet connection.</p>
+    <button onclick="location.reload()">Try again</button>
+  </div>
+</body>
+</html>

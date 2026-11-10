@@ -134,7 +134,11 @@ export async function uploadPolicyMedia(
 
   const { error: uploadError } = await supabase.storage
     .from('policy-media')
-    .upload(fileName, file);
+    .upload(fileName, file, {
+      // 1-year cache: filename includes timestamp so file is effectively immutable.
+      cacheControl: '31536000',
+      upsert: false,
+    });
 
   if (uploadError) throw uploadError;
 

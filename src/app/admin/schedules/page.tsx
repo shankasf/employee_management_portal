@@ -1,13 +1,15 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { useEmployees, useSchedules, invalidateQueries } from '@/lib/hooks/useData'
+import { useEmployees, useSchedules, useLocations, invalidateQueries } from '@/lib/hooks/useData'
 import { ScheduleStatus } from '@/types/supabase'
 import { scheduleNotifications } from '@/lib/notifications'
 import { getTodayNY, getDateNY, formatScheduleDate, formatTimeString } from '@/lib/utils'
 import { RichTextEditor } from '@/components/RichTextEditor'
+import { ScheduledHoursReport } from '@/components/ScheduledHoursReport'
+import { OvertimeHint } from '@/components/OvertimeHint'
 
 // Type for schedule data returned from useSchedules hook
 interface Schedule {
@@ -48,6 +50,16 @@ const statusLabels: Record<ScheduleStatus, string> = {
     completed: 'Completed',
 }
 
+// Fallback list used only if the businesses-backed locations API is unavailable.
+const FALLBACK_LOCATIONS = [
+    'Toy Republic - Crossgates Mall',
+    'Toy Republic - Palisades Center Mall',
+    'Toy Republic - Garden State Plaza Mall',
+    'Toy Republic - Poughkeepsie Galleria Mall',
+    'Toy Republic - Paramus Park Mall',
+    'PlayFunia - Crossgates Mall',
+]
+
 // Extended employee type with shift info
 interface EmployeeWithShift {
     id: string
@@ -56,6 +68,7 @@ interface EmployeeWithShift {
     shift_type: string | null
     shift_start: string | null
     shift_end: string | null
+    is_active: boolean
     profiles: {
         full_name: string | null
         email: string | null
@@ -65,10 +78,28 @@ interface EmployeeWithShift {
 export default function AdminSchedulesPage() {
     const { user } = useAuth()
     const { data: employees = [] } = useEmployees(true) as { data: EmployeeWithShift[] }
+    const { data: locationData = [] } = useLocations()
     const [showModal, setShowModal] = useState(false)
     const [saving, setSaving] = useState(false)
     const [statusFilter, setStatusFilter] = useState<ScheduleStatus | 'all'>('all')
     const [employeeFilter, setEmployeeFilter] = useState('')
+    const [locationFilter, setLocationFilter] = useState('')
+    const [showInactiveEmployees, setShowInactiveEmployees] = useState(false)
+
+    // Location dropdown options — sourced from the businesses table, with a
+    // static fallback if the API hasn't loaded yet.
+    const locationOptions = useMemo(
+        () => (locationData.length > 0 ? locationData.map(l => l.label) : FALLBACK_LOCATIONS),
+        [locationData]
+    )
+
+    // Active employees for selection lists/dropdowns. Full `employees` array is
+    // still kept around so historical schedules for inactive employees can look
+    // up shift info / display names.
+    const visibleEmployees = useMemo(
+        () => employees.filter(emp => emp.id && (showInactiveEmployees || emp.is_active !== false)),
+        [employees, showInactiveEmployees]
+    )
     const [dateFilter, setDateFilter] = useState({
         start: getTodayNY(),
         end: getDateNY(30),
@@ -84,11 +115,14 @@ export default function AdminSchedulesPage() {
 
     const { data: allSchedules = [], isLoading: loading, mutate: refreshSchedules } = useSchedules(filters)
 
-    // Apply status filter client-side so counts always reflect the full dataset
+    // Apply status + location filters client-side so counts always reflect the full dataset
     const schedules = useMemo(() => {
-        if (statusFilter === 'all') return allSchedules
-        return allSchedules.filter((s: { status: string }) => s.status === statusFilter)
-    }, [allSchedules, statusFilter])
+        return allSchedules.filter((s: { status: string; location: string | null }) => {
+            if (statusFilter !== 'all' && s.status !== statusFilter) return false
+            if (locationFilter && (s.location || '') !== locationFilter) return false
+            return true
+        })
+    }, [allSchedules, statusFilter, locationFilter])
 
     const [formData, setFormData] = useState({
         employee_id: '',
@@ -100,7 +134,7 @@ export default function AdminSchedulesPage() {
         location: '',
     })
 
-    // Shift edit modal
+    // Shift edit modal (used from employee profile creation)
     const [showShiftModal, setShowShiftModal] = useState(false)
     const [editingShiftEmployee, setEditingShiftEmployee] = useState<EmployeeWithShift | null>(null)
     const [shiftFormData, setShiftFormData] = useState({
@@ -120,6 +154,50 @@ export default function AdminSchedulesPage() {
         description: '',
         location: '',
     })
+
+    // Upcoming schedules per employee (next non-cancelled schedule from today)
+    const [upcomingSchedules, setUpcomingSchedules] = useState<Record<string, { id: string; schedule_date: string; start_time: string; end_time: string; status: string }>>({})
+
+    const loadUpcomingSchedules = useCallback(async () => {
+        if (employees.length === 0) return
+        try {
+            const supabase = createUntypedClient()
+            const today = getTodayNY()
+            const { data, error } = await supabase
+                .from('schedules')
+                .select('id, employee_id, schedule_date, start_time, end_time, status')
+                .gte('schedule_date', today)
+                .not('status', 'eq', 'cancelled')
+                .order('schedule_date', { ascending: true })
+                .order('start_time', { ascending: true })
+
+            if (error) {
+                console.error('Error loading upcoming schedules:', error)
+                return
+            }
+
+            // Keep only the first (nearest) schedule per employee
+            const map: Record<string, { id: string; schedule_date: string; start_time: string; end_time: string; status: string }> = {}
+            for (const row of data || []) {
+                if (!map[row.employee_id]) {
+                    map[row.employee_id] = {
+                        id: row.id,
+                        schedule_date: row.schedule_date,
+                        start_time: row.start_time,
+                        end_time: row.end_time,
+                        status: row.status,
+                    }
+                }
+            }
+            setUpcomingSchedules(map)
+        } catch (err) {
+            console.error('Error loading upcoming schedules:', err)
+        }
+    }, [employees.length])
+
+    useEffect(() => {
+        loadUpcomingSchedules()
+    }, [loadUpcomingSchedules])
 
     // Bulk schedule form
     const [showBulkModal, setShowBulkModal] = useState(false)
@@ -162,6 +240,13 @@ export default function AdminSchedulesPage() {
 
             if (error) throw error
 
+            // Trigger recurring task creation for this employee and date (non-blocking)
+            fetch('/api/admin/trigger-recurring-tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ employee_ids: [formData.employee_id], dates: [formData.schedule_date] }),
+            }).catch(err => console.error('Failed to trigger recurring tasks:', err))
+
             // Send email notification (non-blocking)
             if (data?.id) {
                 scheduleNotifications.assigned(data.id).catch(console.error)
@@ -178,7 +263,7 @@ export default function AdminSchedulesPage() {
                 description: '',
                 location: '',
             })
-            refreshSchedules()
+            refreshSchedules(); loadUpcomingSchedules(); invalidateQueries.schedules()
         } catch (err: unknown) {
             const error = err as Error
             console.error('Error creating schedule:', error)
@@ -249,6 +334,14 @@ export default function AdminSchedulesPage() {
 
             if (error) throw error
 
+            // Trigger recurring task creation for the scheduled employee and dates (non-blocking)
+            const scheduleDates = Array.from(new Set(schedules.map(s => s.schedule_date)))
+            fetch('/api/admin/trigger-recurring-tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ employee_ids: [bulkFormData.employee_id], dates: scheduleDates }),
+            }).catch(err => console.error('Failed to trigger recurring tasks:', err))
+
             // Find employee name for notification
             const selectedEmployee = employees.find((emp: { id: string }) => emp.id === bulkFormData.employee_id) as { id: string; display_name: string | null; profiles: { full_name: string | null } | null } | undefined
             const employeeName = selectedEmployee?.display_name || selectedEmployee?.profiles?.full_name || 'Employee'
@@ -281,7 +374,7 @@ export default function AdminSchedulesPage() {
             })
             setUseCustomTimes(false)
             setDayTimes({})
-            refreshSchedules()
+            refreshSchedules(); loadUpcomingSchedules(); invalidateQueries.schedules()
         } catch (err: unknown) {
             const error = err as Error
             console.error('Error creating bulk schedules:', error)
@@ -312,7 +405,7 @@ export default function AdminSchedulesPage() {
             // Send email notification (non-blocking)
             scheduleNotifications.adminCancelled(scheduleId, reason).catch(console.error)
 
-            refreshSchedules()
+            refreshSchedules(); loadUpcomingSchedules(); invalidateQueries.schedules()
             invalidateQueries.all()
         } catch (err: unknown) {
             const error = err as Error
@@ -341,7 +434,7 @@ export default function AdminSchedulesPage() {
             // Send email notification (non-blocking)
             scheduleNotifications.cancellationApproved(scheduleId).catch(console.error)
 
-            refreshSchedules()
+            refreshSchedules(); loadUpcomingSchedules(); invalidateQueries.schedules()
             invalidateQueries.all()
         } catch (err: unknown) {
             const error = err as Error
@@ -364,7 +457,7 @@ export default function AdminSchedulesPage() {
                 .eq('id', scheduleId)
 
             if (error) throw error
-            refreshSchedules()
+            refreshSchedules(); loadUpcomingSchedules(); invalidateQueries.schedules()
         } catch (err: unknown) {
             const error = err as Error
             console.error('Error deleting schedule:', error)
@@ -421,7 +514,8 @@ export default function AdminSchedulesPage() {
         }
     }
 
-    // Open shift edit modal
+    // Open shift edit modal (kept for employee profile flow)
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     function openShiftModal(emp: EmployeeWithShift) {
         setEditingShiftEmployee(emp)
         setShiftFormData({
@@ -500,10 +594,17 @@ export default function AdminSchedulesPage() {
 
             if (error) throw error
 
+            // Trigger recurring task creation for the updated date (non-blocking)
+            fetch('/api/admin/trigger-recurring-tasks', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ employee_ids: [editingSchedule.employee_id], dates: [editScheduleData.schedule_date] }),
+            }).catch(err => console.error('Failed to trigger recurring tasks:', err))
+
             alert('Schedule updated successfully!')
             setShowEditModal(false)
             setEditingSchedule(null)
-            refreshSchedules()
+            refreshSchedules(); loadUpcomingSchedules(); invalidateQueries.schedules()
         } catch (err: unknown) {
             const error = err as Error
             console.error('Error updating schedule:', error)
@@ -522,7 +623,7 @@ export default function AdminSchedulesPage() {
                         Manage employee work schedules
                     </p>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex gap-2 items-center">
                     <button className="btn-secondary text-xs sm:text-sm" onClick={() => setShowBulkModal(true)}>
                         Bulk Create
                     </button>
@@ -573,11 +674,24 @@ export default function AdminSchedulesPage() {
                 </button>
             </div>
 
-            {/* Employee Shifts Reference */}
+            {/* Weekly / monthly scheduled hours with overtime flags */}
+            <ScheduledHoursReport employees={employees} visibleEmployeeIds={visibleEmployees.map(e => e.id)} />
+
+            {/* Employee Shift Timings */}
             <div className="card p-4">
-                <div className="flex items-center justify-between mb-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                     <h3 className="font-semibold text-lg">Employee Shift Timings</h3>
-                    <span className="text-xs text-muted-foreground">{employees.filter(emp => emp.id).length} employees</span>
+                    <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={showInactiveEmployees}
+                                onChange={(e) => setShowInactiveEmployees(e.target.checked)}
+                            />
+                            Show inactive employees
+                        </label>
+                        <span className="text-xs text-muted-foreground">{visibleEmployees.length} employees</span>
+                    </div>
                 </div>
                 <div className="overflow-x-auto">
                     <table className="w-full text-sm">
@@ -585,35 +699,70 @@ export default function AdminSchedulesPage() {
                             <tr className="border-b">
                                 <th className="text-left py-2 px-3 font-medium">Employee</th>
                                 <th className="text-left py-2 px-3 font-medium">Shift Type</th>
-                                <th className="text-left py-2 px-3 font-medium">Shift Hours</th>
+                                <th className="text-left py-2 px-3 font-medium">Upcoming Shift</th>
                                 <th className="text-right py-2 px-3 font-medium">Action</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {employees.filter(emp => emp.id).map((emp) => (
-                                <tr key={emp.id} className="border-b border-muted/50 hover:bg-muted/20">
-                                    <td className="py-2 px-3 font-medium">{emp.display_name || emp.profiles?.full_name || 'Unknown'}</td>
-                                    <td className="py-2 px-3">
-                                        <span className="capitalize badge badge-outline text-xs">
-                                            {emp.shift_type || 'Not set'}
-                                        </span>
-                                    </td>
-                                    <td className="py-2 px-3">
-                                        {emp.shift_start && emp.shift_end
-                                            ? <span className="text-primary font-medium">{formatTimeString(emp.shift_start)} - {formatTimeString(emp.shift_end)}</span>
-                                            : <span className="text-muted-foreground">Not set</span>
-                                        }
-                                    </td>
-                                    <td className="py-2 px-3 text-right">
-                                        <button
-                                            onClick={() => openShiftModal(emp)}
-                                            className="text-xs text-primary hover:underline"
-                                        >
-                                            Change Shift
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
+                            {visibleEmployees.map((emp) => {
+                                const upcoming = upcomingSchedules[emp.id]
+                                return (
+                                    <tr key={emp.id} className="border-b border-muted/50 hover:bg-muted/20">
+                                        <td className="py-2 px-3 font-medium">{emp.display_name || emp.profiles?.full_name || 'Unknown'}</td>
+                                        <td className="py-2 px-3">
+                                            <span className="capitalize badge badge-outline text-xs">
+                                                {emp.shift_type || 'Not set'}
+                                            </span>
+                                        </td>
+                                        <td className="py-2 px-3">
+                                            {upcoming
+                                                ? <span className="text-primary font-medium">
+                                                    {formatScheduleDate(upcoming.schedule_date)} &middot; {formatTimeString(upcoming.start_time)} - {formatTimeString(upcoming.end_time)}
+                                                  </span>
+                                                : <span className="text-muted-foreground">No upcoming schedule</span>
+                                            }
+                                        </td>
+                                        <td className="py-2 px-3 text-right flex items-center justify-end gap-2">
+                                            {upcoming && (
+                                                <button
+                                                    onClick={() => {
+                                                        setEditingSchedule({ id: upcoming.id, employee_id: emp.id, schedule_date: upcoming.schedule_date, start_time: upcoming.start_time, end_time: upcoming.end_time, status: upcoming.status as ScheduleStatus } as Schedule)
+                                                        setEditScheduleData({
+                                                            schedule_date: upcoming.schedule_date,
+                                                            start_time: upcoming.start_time.slice(0, 5),
+                                                            end_time: upcoming.end_time.slice(0, 5),
+                                                            title: '',
+                                                            description: '',
+                                                            location: '',
+                                                        })
+                                                        setShowEditModal(true)
+                                                    }}
+                                                    className="text-xs text-orange-600 hover:underline"
+                                                >
+                                                    Edit Schedule
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => {
+                                                    setFormData({
+                                                        employee_id: emp.id,
+                                                        schedule_date: '',
+                                                        start_time: emp.shift_start?.slice(0, 5) || '09:00',
+                                                        end_time: emp.shift_end?.slice(0, 5) || '17:00',
+                                                        title: '',
+                                                        description: '',
+                                                        location: '',
+                                                    })
+                                                    setShowModal(true)
+                                                }}
+                                                className="text-xs text-green-600 hover:underline"
+                                            >
+                                                Add Schedule
+                                            </button>
+                                        </td>
+                                    </tr>
+                                )
+                            })}
                         </tbody>
                     </table>
                 </div>
@@ -622,7 +771,7 @@ export default function AdminSchedulesPage() {
             {/* Filters */}
             <div className="card p-4">
                 <h3 className="font-semibold text-lg mb-4">Filters for Specific Schedules</h3>
-                <div className="grid grid-cols-1 sm:grid-cols-5 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-4">
                     <div>
                         <label className="label">Start Date</label>
                         <input
@@ -649,7 +798,7 @@ export default function AdminSchedulesPage() {
                             onChange={(e) => setEmployeeFilter(e.target.value)}
                         >
                             <option value="">All Employees</option>
-                            {employees.filter(emp => emp.id).map((emp) => (
+                            {visibleEmployees.map((emp) => (
                                 <option key={emp.id} value={emp.id}>
                                     {emp.display_name || emp.profiles?.full_name || 'Unknown'}
                                 </option>
@@ -671,8 +820,21 @@ export default function AdminSchedulesPage() {
                             <option value="completed">Completed</option>
                         </select>
                     </div>
+                    <div>
+                        <label className="label">Location</label>
+                        <select
+                            className="input"
+                            value={locationFilter}
+                            onChange={(e) => setLocationFilter(e.target.value)}
+                        >
+                            <option value="">All Locations</option>
+                            {locationOptions.map((loc) => (
+                                <option key={loc} value={loc}>{loc}</option>
+                            ))}
+                        </select>
+                    </div>
                     <div className="flex items-end">
-                        <button className="btn-secondary w-full" onClick={() => refreshSchedules()}>
+                        <button className="btn-secondary w-full" onClick={() => { refreshSchedules(); loadUpcomingSchedules(); invalidateQueries.schedules() }}>
                             Refresh
                         </button>
                     </div>
@@ -681,8 +843,9 @@ export default function AdminSchedulesPage() {
 
             {/* Create Schedule Modal */}
             {showModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md">
                         <div className="p-4 sm:p-6">
                             <h2 className="text-lg sm:text-xl font-bold mb-4">Create Schedule</h2>
                             <form onSubmit={handleSubmit} className="space-y-4">
@@ -695,7 +858,7 @@ export default function AdminSchedulesPage() {
                                         onChange={(e) => setFormData({ ...formData, employee_id: e.target.value })}
                                     >
                                         <option value="">Select employee...</option>
-                                        {employees.filter(emp => emp.id).map((emp) => (
+                                        {visibleEmployees.map((emp) => (
                                             <option key={emp.id} value={emp.id}>
                                                 {emp.display_name || emp.profiles?.full_name || 'Unknown'}
                                             </option>
@@ -757,6 +920,12 @@ export default function AdminSchedulesPage() {
                                         />
                                     </div>
                                 </div>
+                                <OvertimeHint
+                                    employeeId={formData.employee_id}
+                                    date={formData.schedule_date}
+                                    startTime={formData.start_time}
+                                    endTime={formData.end_time}
+                                />
                                 <div>
                                     <label className="label">Title</label>
                                     <input
@@ -769,13 +938,16 @@ export default function AdminSchedulesPage() {
                                 </div>
                                 <div>
                                     <label className="label">Location</label>
-                                    <input
-                                        type="text"
+                                    <select
                                         className="input"
-                                        placeholder="e.g., Main Floor"
                                         value={formData.location}
                                         onChange={(e) => setFormData({ ...formData, location: e.target.value })}
-                                    />
+                                    >
+                                        <option value="">Select a location</option>
+                                        {locationOptions.map((loc) => (
+                                            <option key={loc} value={loc}>{loc}</option>
+                                        ))}
+                                    </select>
                                 </div>
                                 <div>
                                     <label className="label">Description</label>
@@ -797,13 +969,15 @@ export default function AdminSchedulesPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Bulk Create Modal */}
             {showBulkModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md">
                         <div className="p-4 sm:p-6">
                             <h2 className="text-lg sm:text-xl font-bold mb-4">Bulk Create Schedules</h2>
                             <form onSubmit={handleBulkSubmit} className="space-y-4">
@@ -816,7 +990,7 @@ export default function AdminSchedulesPage() {
                                         onChange={(e) => setBulkFormData({ ...bulkFormData, employee_id: e.target.value })}
                                     >
                                         <option value="">Select employee...</option>
-                                        {employees.filter(emp => emp.id).map((emp) => (
+                                        {visibleEmployees.map((emp) => (
                                             <option key={emp.id} value={emp.id}>
                                                 {emp.display_name || emp.profiles?.full_name || 'Unknown'}
                                             </option>
@@ -1011,12 +1185,16 @@ export default function AdminSchedulesPage() {
                                 </div>
                                 <div>
                                     <label className="label">Location</label>
-                                    <input
-                                        type="text"
+                                    <select
                                         className="input"
                                         value={bulkFormData.location}
                                         onChange={(e) => setBulkFormData({ ...bulkFormData, location: e.target.value })}
-                                    />
+                                    >
+                                        <option value="">Select a location</option>
+                                        {locationOptions.map((loc) => (
+                                            <option key={loc} value={loc}>{loc}</option>
+                                        ))}
+                                    </select>
                                 </div>
                                 <div className="flex gap-3 pt-4">
                                     <button type="button" className="btn-secondary flex-1" onClick={() => setShowBulkModal(false)}>
@@ -1029,12 +1207,14 @@ export default function AdminSchedulesPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Shift Edit Modal */}
             {showShiftModal && editingShiftEmployee && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
                     <div className="bg-card rounded-lg shadow-lg w-full max-w-md">
                         <div className="p-4 sm:p-6">
                             <h2 className="text-lg sm:text-xl font-bold mb-2">Change Shift</h2>
@@ -1090,13 +1270,15 @@ export default function AdminSchedulesPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Schedule Edit Modal */}
             {showEditModal && editingSchedule && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md">
                         <div className="p-4 sm:p-6">
                             <h2 className="text-lg sm:text-xl font-bold mb-4">Edit Schedule</h2>
                             <form onSubmit={handleEditScheduleSave} className="space-y-4">
@@ -1132,6 +1314,13 @@ export default function AdminSchedulesPage() {
                                         />
                                     </div>
                                 </div>
+                                <OvertimeHint
+                                    employeeId={editingSchedule.employee_id}
+                                    date={editScheduleData.schedule_date}
+                                    startTime={editScheduleData.start_time}
+                                    endTime={editScheduleData.end_time}
+                                    excludeScheduleId={editingSchedule.id}
+                                />
                                 <div>
                                     <label className="label">Title</label>
                                     <input
@@ -1143,12 +1332,19 @@ export default function AdminSchedulesPage() {
                                 </div>
                                 <div>
                                     <label className="label">Location</label>
-                                    <input
-                                        type="text"
+                                    <select
                                         className="input"
                                         value={editScheduleData.location}
                                         onChange={(e) => setEditScheduleData({ ...editScheduleData, location: e.target.value })}
-                                    />
+                                    >
+                                        <option value="">Select a location</option>
+                                        {editScheduleData.location && !locationOptions.includes(editScheduleData.location) && (
+                                            <option value={editScheduleData.location}>{editScheduleData.location}</option>
+                                        )}
+                                        {locationOptions.map((loc) => (
+                                            <option key={loc} value={loc}>{loc}</option>
+                                        ))}
+                                    </select>
                                 </div>
                                 <div>
                                     <label className="label">Description</label>
@@ -1173,6 +1369,7 @@ export default function AdminSchedulesPage() {
                                 </div>
                             </form>
                         </div>
+                    </div>
                     </div>
                 </div>
             )}

@@ -2,6 +2,7 @@ import { createClient as createServerClient } from '@/lib/supabase/server'
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 import { logActivity, getRequestInfo } from '@/lib/activity-log'
+import { getAdminContext, isEmployeeInScope } from '@/lib/auth/adminScope'
 
 function createAdminClient() {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
@@ -25,13 +26,8 @@ export async function PATCH(request: NextRequest) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
         }
 
-        const { data: profile } = await supabase
-            .from('profiles')
-            .select('role')
-            .eq('id', user.id)
-            .single()
-
-        if ((profile as { role: string } | null)?.role !== 'admin') {
+        const ctx = await getAdminContext()
+        if (!ctx || ctx.role !== 'admin') {
             return NextResponse.json({ error: 'Forbidden - Admin only' }, { status: 403 })
         }
 
@@ -75,14 +71,41 @@ export async function PATCH(request: NextRequest) {
             return NextResponse.json({ error: 'Attendance record not found' }, { status: 404 })
         }
 
+        // Scoped admins may only edit attendance for their locations' employees.
+        if (!(await isEmployeeInScope(ctx, existing.employee_id))) {
+            return NextResponse.json({ error: 'Forbidden - outside your assigned locations' }, { status: 403 })
+        }
+
         const breakMinutes = existing.break_minutes || 0
 
         // Calculate new total_hours if clock_out is set
         let newTotalHours: number | null = null
         if (clockOutDate) {
             const diffMs = clockOutDate.getTime() - clockInDate.getTime()
-            newTotalHours = diffMs / 3600000 - breakMinutes / 60
+            newTotalHours = Math.round((diffMs / 3600000 - breakMinutes / 60) * 100) / 100
             if (newTotalHours < 0) newTotalHours = 0
+
+            // Cap at scheduled hours
+            const clockInNYDate = new Date(clockInDate.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+            const nyDateStr = `${clockInNYDate.getFullYear()}-${String(clockInNYDate.getMonth() + 1).padStart(2, '0')}-${String(clockInNYDate.getDate()).padStart(2, '0')}`
+            const { data: sched } = await adminClient
+                .from('schedules')
+                .select('start_time, end_time')
+                .eq('employee_id', existing.employee_id)
+                .eq('schedule_date', nyDateStr)
+                .neq('status', 'cancelled')
+                .order('start_time', { ascending: true })
+                .limit(1)
+                .single()
+
+            if (sched?.start_time && sched?.end_time) {
+                const [sh, sm] = sched.start_time.split(':').map(Number)
+                const [eh, em] = sched.end_time.split(':').map(Number)
+                const scheduledHours = Math.round(((eh * 60 + em) - (sh * 60 + sm)) / 60 * 100) / 100
+                if (scheduledHours > 0 && newTotalHours > scheduledHours) {
+                    newTotalHours = scheduledHours
+                }
+            }
         }
 
         // Step 1: Update clock_in and clock_out, clear late annotations (admin edit is explicit override)
@@ -94,6 +117,7 @@ export async function PATCH(request: NextRequest) {
                 actual_clock_out: null,
                 late_clock_out_minutes: null,
                 late_flag: false,
+                edited_by_admin: true,
             })
             .eq('id', id)
 

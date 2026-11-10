@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient as createServerSupabase } from '@/lib/supabase/server'
 import { logActivity, getRequestInfo } from '@/lib/activity-log'
+import { requireAdmin, getScopedEmployeeIds } from '@/lib/auth/adminScope'
 
 function createAdminClient() {
   return createClient(
@@ -14,26 +14,23 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 export async function POST(request: NextRequest) {
   try {
-    // Auth check
-    const supabase = await createServerSupabase()
-    const { data: { user } } = await supabase.auth.getUser()
-
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
+    // Auth check (any admin tier)
+    const gate = await requireAdmin()
+    if (!gate.ok) return gate.response
+    const { ctx } = gate
+    const user = { id: ctx.userId, email: '' as string | undefined }
 
     const supabaseAdmin = createAdminClient()
 
-    // Admin role check
     const { data: profile } = await supabaseAdmin
       .from('profiles')
-      .select('role, full_name, email')
-      .eq('id', user.id)
+      .select('full_name, email')
+      .eq('id', ctx.userId)
       .single()
 
-    if (profile?.role !== 'admin') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-    }
+    // Scoped admins may only delete task instances for their locations.
+    const scopedEmployeeIds = await getScopedEmployeeIds(ctx)
+    const scopedSet = scopedEmployeeIds === null ? null : new Set(scopedEmployeeIds)
 
     // Parse and validate body
     const body = await request.json()
@@ -67,6 +64,19 @@ export async function POST(request: NextRequest) {
 
     if (!instances || instances.length === 0) {
       return NextResponse.json({ error: 'No matching task instances found' }, { status: 404 })
+    }
+
+    // Enforce location scope: a scoped admin cannot delete any out-of-scope instance.
+    if (scopedSet !== null) {
+      const hasOutOfScope = instances.some(
+        (i) => !i.employee_id || !scopedSet.has(i.employee_id),
+      )
+      if (hasOutOfScope) {
+        return NextResponse.json(
+          { error: 'One or more task instances are outside your assigned locations' },
+          { status: 403 },
+        )
+      }
     }
 
     const idsToDelete = instances.map(i => i.id)
@@ -143,7 +153,7 @@ export async function POST(request: NextRequest) {
 
     await logActivity({
       adminId: user.id,
-      adminEmail: profile.email || user.email || 'unknown',
+      adminEmail: profile?.email || user.email || 'unknown',
       action: 'task_instances_bulk_deleted',
       entityType: 'task_instance',
       entityId: idsToDelete[0],

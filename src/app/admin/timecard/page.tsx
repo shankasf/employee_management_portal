@@ -15,12 +15,9 @@ interface TimeCardEntry {
     total_hours: number | null
     break_minutes: number
     work_type: string
+    shift_timing: string | null
     clock_in_location_status: string | null
     clock_out_location_status: string | null
-    clock_in_lat: number | null
-    clock_in_lng: number | null
-    clock_out_lat: number | null
-    clock_out_lng: number | null
     clock_in_location_name: string | null
     clock_out_location_name: string | null
     notes: string | null
@@ -28,6 +25,7 @@ interface TimeCardEntry {
     early_checkout_flag: boolean
     actual_clock_out: string | null
     late_clock_out_minutes: number | null
+    edited_by_admin: boolean
     employee?: {
         id: string
         display_name: string | null
@@ -58,26 +56,6 @@ function escapeHtml(str: string): string {
         .replace(/'/g, '&#39;')
 }
 
-// In-memory geocode cache shared across fetcher calls
-const geocodeCache = new Map<string, string>()
-
-async function resolveLocation(lat: number | null, lng: number | null): Promise<string | null> {
-    if (lat == null || lng == null) return null
-    const key = `${lat.toFixed(3)},${lng.toFixed(3)}`
-    if (geocodeCache.has(key)) return geocodeCache.get(key)!
-    try {
-        const res = await fetch(`/api/geocode?lat=${lat}&lng=${lng}`)
-        if (!res.ok) throw new Error('failed')
-        const data = await res.json()
-        const label = data.location || `${lat.toFixed(4)}, ${lng.toFixed(4)}`
-        geocodeCache.set(key, label)
-        return label
-    } catch {
-        const fallback = `${lat.toFixed(4)}, ${lng.toFixed(4)}`
-        geocodeCache.set(key, fallback)
-        return fallback
-    }
-}
 
 export default function AdminTimeCardPage() {
     const { data: employees = [] } = useEmployees(true) as { data: Employee[] }
@@ -92,6 +70,32 @@ export default function AdminTimeCardPage() {
         const firstDay = today.slice(0, 8) + '01'
         return { start: firstDay, end: today }
     })
+
+    // Additional (client-side) filters
+    const [searchQuery, setSearchQuery] = useState('')
+    const [statusFilter, setStatusFilter] = useState<'all' | 'complete' | 'in_progress'>('all')
+    const [workTypeFilter, setWorkTypeFilter] = useState('all')
+    const [shiftFilter, setShiftFilter] = useState('all')
+    const [locationFilter, setLocationFilter] = useState<'all' | 'gps' | 'no_gps' | 'named'>('all')
+    const [minHours, setMinHours] = useState('')
+    const [maxHours, setMaxHours] = useState('')
+    const [flagFilters, setFlagFilters] = useState({
+        late: false,
+        earlyCheckout: false,
+        lateCheckout: false,
+        editedByAdmin: false,
+    })
+
+    const clearFilters = useCallback(() => {
+        setSearchQuery('')
+        setStatusFilter('all')
+        setWorkTypeFilter('all')
+        setShiftFilter('all')
+        setLocationFilter('all')
+        setMinHours('')
+        setMaxHours('')
+        setFlagFilters({ late: false, earlyCheckout: false, lateCheckout: false, editedByAdmin: false })
+    }, [])
 
     // Edit modal state
     const [editingEntry, setEditingEntry] = useState<TimeCardEntry | null>(null)
@@ -251,17 +255,17 @@ export default function AdminTimeCardPage() {
                     total_hours,
                     break_minutes,
                     work_type,
+                    shift_timing,
                     clock_in_location_status,
                     clock_out_location_status,
-                    clock_in_lat,
-                    clock_in_lng,
-                    clock_out_lat,
-                    clock_out_lng,
+                    clock_in_location_name,
+                    clock_out_location_name,
                     notes,
                     late_flag,
                     early_checkout_flag,
                     actual_clock_out,
                     late_clock_out_minutes,
+                    edited_by_admin,
                     employee:employees (
                         id,
                         display_name,
@@ -287,22 +291,7 @@ export default function AdminTimeCardPage() {
                 return { entries: [], totals: { totalHours: 0, totalBreak: 0, daysWorked: 0 } }
             }
 
-            const rawEntries = (data || []) as TimeCardEntry[]
-
-            // Resolve location names inside the fetcher (no useEffect needed)
-            const entries = await Promise.all(rawEntries.map(async (entry) => {
-                const clockInName = entry.clock_in_location_status === 'captured'
-                    ? await resolveLocation(entry.clock_in_lat, entry.clock_in_lng)
-                    : null
-                const clockOutName = entry.clock_out_location_status === 'captured'
-                    ? await resolveLocation(entry.clock_out_lat, entry.clock_out_lng)
-                    : null
-                return {
-                    ...entry,
-                    clock_in_location_name: clockInName,
-                    clock_out_location_name: clockOutName,
-                }
-            }))
+            const entries = (data || []) as TimeCardEntry[]
 
             // Calculate totals
             let totalHours = 0
@@ -326,10 +315,94 @@ export default function AdminTimeCardPage() {
         { revalidateOnFocus: false }
     )
 
-    const timeCardEntries = timeCardData?.entries || []
-    const monthlyTotals = timeCardData?.totals || {
-        totalHours: 0, totalBreak: 0, daysWorked: 0
-    }
+    const allEntries = timeCardData?.entries || []
+
+    // Dynamic dropdown options derived from the fetched data
+    const workTypeOptions = useMemo(() => {
+        const set = new Set<string>()
+        allEntries.forEach((e) => { if (e.work_type) set.add(e.work_type) })
+        return Array.from(set).sort()
+    }, [allEntries])
+
+    const shiftOptions = useMemo(() => {
+        const set = new Set<string>()
+        allEntries.forEach((e) => { if (e.shift_timing) set.add(e.shift_timing) })
+        return Array.from(set).sort()
+    }, [allEntries])
+
+    // Apply all client-side filters
+    const timeCardEntries = useMemo(() => {
+        const q = searchQuery.trim().toLowerCase()
+        const min = minHours.trim() === '' ? null : parseFloat(minHours)
+        const max = maxHours.trim() === '' ? null : parseFloat(maxHours)
+
+        return allEntries.filter((entry) => {
+            // Status
+            if (statusFilter === 'complete' && !entry.clock_out) return false
+            if (statusFilter === 'in_progress' && entry.clock_out) return false
+
+            // Work type
+            if (workTypeFilter !== 'all' && entry.work_type !== workTypeFilter) return false
+
+            // Shift timing
+            if (shiftFilter !== 'all' && (entry.shift_timing || '') !== shiftFilter) return false
+
+            // Location
+            if (locationFilter === 'gps') {
+                if (entry.clock_in_location_status !== 'captured' && entry.clock_out_location_status !== 'captured') return false
+            } else if (locationFilter === 'no_gps') {
+                if (entry.clock_in_location_status === 'captured' || entry.clock_out_location_status === 'captured') return false
+            } else if (locationFilter === 'named') {
+                if (!entry.clock_in_location_name && !entry.clock_out_location_name) return false
+            }
+
+            // Attendance flags (AND across enabled flags)
+            if (flagFilters.late && !entry.late_flag) return false
+            if (flagFilters.earlyCheckout && !entry.early_checkout_flag) return false
+            if (flagFilters.lateCheckout && !(entry.late_clock_out_minutes && entry.late_clock_out_minutes > 0)) return false
+            if (flagFilters.editedByAdmin && !entry.edited_by_admin) return false
+
+            // Hours range
+            const hours = entry.total_hours || 0
+            if (min !== null && !isNaN(min) && hours < min) return false
+            if (max !== null && !isNaN(max) && hours > max) return false
+
+            // Name search
+            if (q) {
+                const name = (entry.employee?.display_name || entry.employee?.profiles?.full_name || '').toLowerCase()
+                const email = (entry.employee?.profiles?.email || '').toLowerCase()
+                if (!name.includes(q) && !email.includes(q)) return false
+            }
+
+            return true
+        })
+    }, [allEntries, searchQuery, statusFilter, workTypeFilter, shiftFilter, locationFilter, minHours, maxHours, flagFilters])
+
+    // Recompute totals from the filtered set so summary cards/exports stay in sync
+    const monthlyTotals = useMemo(() => {
+        let totalHours = 0
+        let totalBreak = 0
+        timeCardEntries.forEach((entry) => {
+            totalHours += entry.total_hours || 0
+            totalBreak += entry.break_minutes || 0
+        })
+        return {
+            totalHours,
+            totalBreak,
+            daysWorked: new Set(timeCardEntries.filter((e) => e.clock_out).map((e) => formatDate(e.clock_in))).size,
+        }
+    }, [timeCardEntries])
+
+    const activeFilterCount = (
+        (searchQuery.trim() ? 1 : 0) +
+        (statusFilter !== 'all' ? 1 : 0) +
+        (workTypeFilter !== 'all' ? 1 : 0) +
+        (shiftFilter !== 'all' ? 1 : 0) +
+        (locationFilter !== 'all' ? 1 : 0) +
+        (minHours.trim() ? 1 : 0) +
+        (maxHours.trim() ? 1 : 0) +
+        Object.values(flagFilters).filter(Boolean).length
+    )
 
     // Format hours to readable format
     function formatHours(hours: number | null): string {
@@ -354,7 +427,7 @@ export default function AdminTimeCardPage() {
         const csvCell = (val: string) => `"${val.replace(/"/g, '""')}"`
         const csvRow = (cells: string[]) => cells.map(csvCell).join(',')
 
-        const headers = ['Employee', 'Date', 'Status', 'Type', 'Clock In', 'Clock Out', 'Actual Clock Out', 'Late Out (min)', 'Break', 'Hours', 'Clock In Location', 'Clock Out Location']
+        const headers = ['Employee', 'Date', 'Status', 'Shift Timing', 'Clock In', 'Clock Out', 'Actual Clock Out', 'Late Out (min)', 'Break', 'Hours', 'Clock In Location', 'Clock Out Location']
         const rows = timeCardEntries.map(entry => {
             const hours = entry.total_hours || 0
             const empName = entry.employee?.display_name || entry.employee?.profiles?.full_name || 'Unknown'
@@ -363,7 +436,7 @@ export default function AdminTimeCardPage() {
                 empName,
                 formatShortDate(entry.clock_in),
                 entry.clock_out ? 'Complete' : 'In Progress',
-                entry.work_type || 'Regular',
+                entry.shift_timing || 'Not set',
                 formatTime(entry.clock_in),
                 entry.clock_out ? formatTime(entry.clock_out) : '-',
                 entry.actual_clock_out ? formatTime(entry.actual_clock_out) : '',
@@ -568,6 +641,125 @@ export default function AdminTimeCardPage() {
                             </button>
                         </div>
                     </div>
+
+                    {/* Advanced filters */}
+                    <div className="border-t pt-4 flex flex-col gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                            <div className="flex items-center gap-2 flex-1 min-w-[200px]">
+                                <label className="text-sm font-medium text-muted-foreground">Search:</label>
+                                <input
+                                    type="text"
+                                    value={searchQuery}
+                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                    placeholder="Employee name or email..."
+                                    className="input w-full"
+                                />
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm font-medium text-muted-foreground">Status:</label>
+                                <select
+                                    className="input w-auto"
+                                    value={statusFilter}
+                                    onChange={(e) => setStatusFilter(e.target.value as 'all' | 'complete' | 'in_progress')}
+                                >
+                                    <option value="all">All</option>
+                                    <option value="complete">Complete</option>
+                                    <option value="in_progress">In Progress</option>
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm font-medium text-muted-foreground">Work Type:</label>
+                                <select
+                                    className="input w-auto"
+                                    value={workTypeFilter}
+                                    onChange={(e) => setWorkTypeFilter(e.target.value)}
+                                >
+                                    <option value="all">All</option>
+                                    {workTypeOptions.map((wt) => (
+                                        <option key={wt} value={wt}>{wt}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm font-medium text-muted-foreground">Shift:</label>
+                                <select
+                                    className="input w-auto"
+                                    value={shiftFilter}
+                                    onChange={(e) => setShiftFilter(e.target.value)}
+                                >
+                                    <option value="all">All</option>
+                                    {shiftOptions.map((s) => (
+                                        <option key={s} value={s}>{s}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm font-medium text-muted-foreground">Location:</label>
+                                <select
+                                    className="input w-auto"
+                                    value={locationFilter}
+                                    onChange={(e) => setLocationFilter(e.target.value as 'all' | 'gps' | 'no_gps' | 'named')}
+                                >
+                                    <option value="all">All</option>
+                                    <option value="gps">GPS captured</option>
+                                    <option value="named">Named location</option>
+                                    <option value="no_gps">No GPS</option>
+                                </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <label className="text-sm font-medium text-muted-foreground">Hours:</label>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    step="0.5"
+                                    value={minHours}
+                                    onChange={(e) => setMinHours(e.target.value)}
+                                    placeholder="Min"
+                                    className="input w-20"
+                                />
+                                <span className="text-muted-foreground">–</span>
+                                <input
+                                    type="number"
+                                    min="0"
+                                    step="0.5"
+                                    value={maxHours}
+                                    onChange={(e) => setMaxHours(e.target.value)}
+                                    placeholder="Max"
+                                    className="input w-20"
+                                />
+                            </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">
+                            <span className="text-sm font-medium text-muted-foreground">Flags:</span>
+                            {([
+                                { key: 'late', label: 'Late arrival' },
+                                { key: 'earlyCheckout', label: 'Early checkout' },
+                                { key: 'lateCheckout', label: 'Late clock-out' },
+                                { key: 'editedByAdmin', label: 'Edited by admin' },
+                            ] as const).map((flag) => (
+                                <label key={flag.key} className="flex items-center gap-1.5 text-sm cursor-pointer select-none">
+                                    <input
+                                        type="checkbox"
+                                        checked={flagFilters[flag.key]}
+                                        onChange={(e) => setFlagFilters((prev) => ({ ...prev, [flag.key]: e.target.checked }))}
+                                        className="rounded border-input"
+                                    />
+                                    {flag.label}
+                                </label>
+                            ))}
+                            <div className="ml-auto flex items-center gap-3">
+                                <span className="text-sm text-muted-foreground">
+                                    {timeCardEntries.length} {timeCardEntries.length === 1 ? 'entry' : 'entries'}
+                                    {activeFilterCount > 0 && ` (${activeFilterCount} ${activeFilterCount === 1 ? 'filter' : 'filters'})`}
+                                </span>
+                                {activeFilterCount > 0 && (
+                                    <button onClick={clearFilters} className="btn-ghost text-sm">
+                                        Clear filters
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -589,7 +781,8 @@ export default function AdminTimeCardPage() {
 
             {/* Edit Modal */}
             {editingEntry && (
-                <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={closeEditModal}>
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto" onClick={closeEditModal}>
+                    <div className="flex min-h-full items-center justify-center p-4">
                     <div className="bg-background rounded-lg shadow-xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
                         <div className="p-5">
                             <h3 className="text-lg font-semibold mb-1">Edit Attendance Time</h3>
@@ -656,6 +849,7 @@ export default function AdminTimeCardPage() {
                             </div>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
@@ -674,7 +868,16 @@ export default function AdminTimeCardPage() {
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                                 </svg>
                             </div>
-                            <p className="text-muted-foreground">No time entries for this period</p>
+                            <p className="text-muted-foreground">
+                                {allEntries.length > 0 && activeFilterCount > 0
+                                    ? 'No entries match the current filters'
+                                    : 'No time entries for this period'}
+                            </p>
+                            {allEntries.length > 0 && activeFilterCount > 0 && (
+                                <button onClick={clearFilters} className="btn-ghost text-sm mt-3 print:hidden">
+                                    Clear filters
+                                </button>
+                            )}
                         </div>
                     ) : (
                         <table className="w-full">
@@ -685,7 +888,7 @@ export default function AdminTimeCardPage() {
                                     )}
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Date</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Status</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Type</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Shift Timing</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Clock In</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Clock Out</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Break</th>
@@ -715,7 +918,7 @@ export default function AdminTimeCardPage() {
                                                     {entry.clock_out ? 'Complete' : 'In Progress'}
                                                 </span>
                                             </td>
-                                            <td className="px-4 py-3 text-sm capitalize">{entry.work_type || 'Regular'}</td>
+                                            <td className="px-4 py-3 text-sm">{entry.shift_timing || 'Not set'}</td>
                                             <td className="px-4 py-3 text-sm font-mono">
                                                 <span className="inline-flex items-center gap-1">
                                                     {formatTime(entry.clock_in)}
@@ -729,6 +932,9 @@ export default function AdminTimeCardPage() {
                                                         </svg>
                                                     </button>
                                                 </span>
+                                                {entry.edited_by_admin && (
+                                                    <div className="text-xs text-blue-600 dark:text-blue-400 font-sans">Edited by Admin</div>
+                                                )}
                                             </td>
                                             <td className="px-4 py-3 text-sm font-mono">
                                                 <span className="inline-flex items-center gap-1">

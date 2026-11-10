@@ -7,7 +7,18 @@ import { useAuth } from '@/contexts/AuthContext'
 import { IdDocumentType } from '@/types/supabase'
 import { logFormSubmit } from '@/lib/usage-log'
 import { logValidationRejection, startUpload } from '@/lib/upload-logger'
-import { getSignedStorageUrl, getPublicProfilePicUrl, formatTimeString } from '@/lib/utils'
+import { getSignedStorageUrl, getProfilePicSrc, formatTimeString } from '@/lib/utils'
+
+interface EmployeeBusiness {
+    business_id: number
+    businesses: { id: number; name: string; location: string | null }
+}
+
+interface Business {
+    id: number
+    name: string
+    location: string | null
+}
 
 interface Employee {
     id: string
@@ -34,12 +45,23 @@ interface Employee {
     emergency_contact_phone: string | null
     hr_notes: string | null
     is_active: boolean
+    employee_businesses?: EmployeeBusiness[]
     profiles: {
         email: string | null
         full_name: string | null
         role: string
         status: string
+        is_super_admin?: boolean | null
+        admin_scoped?: boolean | null
     } | null
+}
+
+// Human-readable role label incl. the admin tier.
+function roleLabel(p?: { role?: string | null; is_super_admin?: boolean | null; admin_scoped?: boolean | null } | null): string {
+    if (p?.role !== 'admin') return 'Employee'
+    if (p?.is_super_admin) return 'Super Admin'
+    if (p?.admin_scoped) return 'Location Admin'
+    return 'Admin'
 }
 
 const defaultFormData = {
@@ -51,32 +73,7 @@ const defaultFormData = {
     shift_type: 'full-time',
     shift_start: '',
     shift_end: '',
-    company_name: '',
-    work_location: '',
-    date_of_birth: '',
-    phone_number: '',
-    street_address: '',
-    city: '',
-    state: '',
-    zip_code: '',
-    country: 'USA',
-    id_document_type: '' as IdDocumentType | '',
-    id_document_number: '',
-    id_document_expiry: '',
-    emergency_contact_name: '',
-    emergency_contact_phone: '',
-    hr_notes: '',
-    role: 'employee'
-}
-
-const defaultEditFormData = {
-    display_name: '',
-    position: '',
-    shift_type: 'full-time',
-    shift_start: '',
-    shift_end: '',
-    company_name: '',
-    work_location: '',
+    business_ids: [] as number[],
     date_of_birth: '',
     phone_number: '',
     street_address: '',
@@ -91,13 +88,42 @@ const defaultEditFormData = {
     emergency_contact_phone: '',
     hr_notes: '',
     role: 'employee',
-    is_active: true
+    // Scoped-admin controls (super-admin only, shown when role === 'admin')
+    admin_scoped: false,
+    admin_business_ids: [] as number[],
+}
+
+const defaultEditFormData = {
+    display_name: '',
+    position: '',
+    shift_type: 'full-time',
+    shift_start: '',
+    shift_end: '',
+    business_ids: [] as number[],
+    date_of_birth: '',
+    phone_number: '',
+    street_address: '',
+    city: '',
+    state: '',
+    zip_code: '',
+    country: 'USA',
+    id_document_type: '' as IdDocumentType | '',
+    id_document_number: '',
+    id_document_expiry: '',
+    emergency_contact_name: '',
+    emergency_contact_phone: '',
+    hr_notes: '',
+    role: 'employee',
+    is_active: true,
+    // Scoped-admin controls (super-admin only, shown when role === 'admin')
+    admin_scoped: false,
+    admin_business_ids: [] as number[],
 }
 
 // Component to display profile picture with public URL (no signing needed)
 function ProfilePicture({ url, name, size = 'md' }: { url: string | null, name: string, size?: 'sm' | 'md' | 'lg' }) {
     const [hasError, setHasError] = useState(false)
-    const publicUrl = getPublicProfilePicUrl(url)
+    const publicUrl = getProfilePicSrc(url)
 
     const sizeClasses = {
         sm: 'w-8 h-8 text-sm',
@@ -164,7 +190,7 @@ function ViewIdDocument({ url }: { url: string }) {
 export default function EmployeesPage() {
     // Always show all employees including inactive ones
     const { data: employees = [], isLoading: loading, mutate } = useEmployees(true)
-    const { user, refreshProfile } = useAuth()
+    const { user, refreshProfile, isSuperAdmin, isScopedAdmin, managedBusinessIds } = useAuth()
     const [showModal, setShowModal] = useState(false)
     const [showEditModal, setShowEditModal] = useState(false)
     const [showViewModal, setShowViewModal] = useState(false)
@@ -175,6 +201,20 @@ export default function EmployeesPage() {
     const [editFormData, setEditFormData] = useState(defaultEditFormData)
     const [activeTab, setActiveTab] = useState<'basic' | 'address' | 'id' | 'hr'>('basic')
 
+    // Businesses list for dropdown
+    const [businesses, setBusinesses] = useState<Business[]>([])
+    useEffect(() => {
+        const supabase = createUntypedClient()
+        supabase.from('businesses').select('*').order('name').then(({ data }: { data: Business[] | null }) => {
+            if (data) setBusinesses(data)
+        })
+    }, [])
+
+    // Scoped admins may only assign employees to their own managed locations.
+    const visibleBusinesses = isScopedAdmin
+        ? businesses.filter(b => managedBusinessIds.includes(b.id))
+        : businesses
+
     // Delete state
     const [showDeleteModal, setShowDeleteModal] = useState(false)
     const [deletingEmployee, setDeletingEmployee] = useState<Employee | null>(null)
@@ -182,18 +222,23 @@ export default function EmployeesPage() {
     const [deleteConfirmed, setDeleteConfirmed] = useState(false)
     const [deleting, setDeleting] = useState(false)
 
-    // Search
+    // Search + status filter
     const [searchQuery, setSearchQuery] = useState('')
+    const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all')
     const filteredEmployees = useMemo(() => {
-        if (!searchQuery.trim()) return employees as Employee[]
-        const q = searchQuery.toLowerCase()
-        return (employees as Employee[]).filter(emp =>
-            (emp.display_name?.toLowerCase().includes(q)) ||
-            (emp.profiles?.full_name?.toLowerCase().includes(q)) ||
-            (emp.profiles?.email?.toLowerCase().includes(q)) ||
-            (emp.position?.toLowerCase().includes(q))
-        )
-    }, [employees, searchQuery])
+        const q = searchQuery.trim().toLowerCase()
+        return (employees as Employee[]).filter(emp => {
+            if (statusFilter === 'active' && !emp.is_active) return false
+            if (statusFilter === 'inactive' && emp.is_active) return false
+            if (!q) return true
+            return (
+                (emp.display_name?.toLowerCase().includes(q)) ||
+                (emp.profiles?.full_name?.toLowerCase().includes(q)) ||
+                (emp.profiles?.email?.toLowerCase().includes(q)) ||
+                (emp.position?.toLowerCase().includes(q))
+            )
+        })
+    }, [employees, searchQuery, statusFilter])
 
     // Password visibility
     const [showPassword, setShowPassword] = useState(false)
@@ -344,8 +389,7 @@ export default function EmployeesPage() {
             shift_type: emp.shift_type || 'full-time',
             shift_start: emp.shift_start || '',
             shift_end: emp.shift_end || '',
-            company_name: emp.company_name || '',
-            work_location: emp.work_location || '',
+            business_ids: emp.employee_businesses?.map(eb => eb.businesses.id) || [],
             date_of_birth: emp.date_of_birth || '',
             phone_number: emp.phone_number || '',
             street_address: emp.street_address || '',
@@ -360,14 +404,29 @@ export default function EmployeesPage() {
             emergency_contact_phone: emp.emergency_contact_phone || '',
             hr_notes: emp.hr_notes || '',
             role: emp.profiles?.role || 'employee',
-            is_active: emp.is_active
+            is_active: emp.is_active,
+            admin_scoped: false,
+            admin_business_ids: [],
         })
         // Load existing profile picture (public URL, no signing needed)
-        setExistingProfilePicUrl(getPublicProfilePicUrl(emp.profile_picture_url))
+        setExistingProfilePicUrl(getProfilePicSrc(emp.profile_picture_url))
         setEditProfilePicFile(null)
         setEditProfilePicPreview(null)
         setActiveTab('basic')
         setShowEditModal(true)
+
+        // For admins, load current scope settings (super-admin only surfaces the UI).
+        if (emp.profiles?.role === 'admin' && isSuperAdmin) {
+            const supabase = createUntypedClient()
+            Promise.all([
+                supabase.from('profiles').select('admin_scoped').eq('id', emp.id).single(),
+                supabase.from('admin_businesses').select('business_id').eq('admin_id', emp.id),
+            ]).then(([profRes, bizRes]: [{ data: unknown }, { data: unknown }]) => {
+                const scoped = !!(profRes.data as { admin_scoped?: boolean } | null)?.admin_scoped
+                const ids = ((bizRes.data as { business_id: number }[] | null) || []).map(r => r.business_id)
+                setEditFormData(prev => ({ ...prev, admin_scoped: scoped, admin_business_ids: ids }))
+            }).catch(() => { /* non-fatal */ })
+        }
     }
 
     function openViewModal(emp: Employee) {
@@ -479,8 +538,6 @@ export default function EmployeesPage() {
                     shift_type: editFormData.shift_type,
                     shift_start: editFormData.shift_start || null,
                     shift_end: editFormData.shift_end || null,
-                    company_name: editFormData.company_name || null,
-                    work_location: editFormData.work_location || null,
                     date_of_birth: editFormData.date_of_birth || null,
                     phone_number: editFormData.phone_number || null,
                     street_address: editFormData.street_address || null,
@@ -503,8 +560,23 @@ export default function EmployeesPage() {
             // Run updates in PARALLEL for faster response
             const updates: Promise<{ error: Error | null }>[] = [employeeUpdate]
 
-            // Only update profile if role changed
-            if (editFormData.role !== editingEmployee.profiles?.role) {
+            // Update profile role / admin scope.
+            if (isSuperAdmin) {
+                // Super admins may set role AND the scoped-admin flag.
+                const targetIsAdmin = editFormData.role === 'admin'
+                const profilePatch: { role?: string; admin_scoped?: boolean } = {
+                    admin_scoped: targetIsAdmin ? editFormData.admin_scoped : false,
+                }
+                if (editFormData.role !== editingEmployee.profiles?.role) {
+                    profilePatch.role = editFormData.role
+                }
+                updates.push(
+                    supabase
+                        .from('profiles')
+                        .update(profilePatch)
+                        .eq('id', editingEmployee.id)
+                )
+            } else if (editFormData.role !== editingEmployee.profiles?.role) {
                 updates.push(
                     supabase
                         .from('profiles')
@@ -516,6 +588,31 @@ export default function EmployeesPage() {
             const results = await Promise.all(updates)
             const errors = results.filter(r => r.error).map(r => r.error)
             if (errors.length > 0) throw errors[0]
+
+            // Sync business assignments server-side (diff-based, scope-aware).
+            // Do NOT delete+reinsert from the client: for scoped admins the RLS
+            // insert check fails once the rows are gone, stranding the employee
+            // with no locations.
+            const bizRes = await fetch('/api/admin/employees', {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: editingEmployee.id, business_ids: editFormData.business_ids }),
+            })
+            if (!bizRes.ok) {
+                const bizBody = await bizRes.json().catch(() => ({}))
+                throw new Error(bizBody.error || 'Failed to update location assignments')
+            }
+
+            // Sync managed-location assignments for scoped admins (super-admin only).
+            if (isSuperAdmin) {
+                await supabase.from('admin_businesses').delete().eq('admin_id', editingEmployee.id)
+                if (editFormData.role === 'admin' && editFormData.admin_scoped && editFormData.admin_business_ids.length > 0) {
+                    const { error: adminBizError } = await supabase.from('admin_businesses').insert(
+                        editFormData.admin_business_ids.map(bid => ({ admin_id: editingEmployee.id, business_id: bid }))
+                    )
+                    if (adminBizError) throw adminBizError
+                }
+            }
 
             logFormSubmit('Edit Employee', 'employee', true, { employeeId: editingEmployee.id })
             alert('Employee updated successfully!')
@@ -553,8 +650,7 @@ export default function EmployeesPage() {
                     shift_type: formData.shift_type,
                     shift_start: formData.shift_start || null,
                     shift_end: formData.shift_end || null,
-                    company_name: formData.company_name || null,
-                    work_location: formData.work_location || null,
+                    business_ids: formData.business_ids,
                     date_of_birth: formData.date_of_birth || null,
                     phone_number: formData.phone_number || null,
                     street_address: formData.street_address || null,
@@ -568,7 +664,9 @@ export default function EmployeesPage() {
                     emergency_contact_name: formData.emergency_contact_name || null,
                     emergency_contact_phone: formData.emergency_contact_phone || null,
                     hr_notes: formData.hr_notes || null,
-                    role: formData.role
+                    role: formData.role,
+                    admin_scoped: formData.role === 'admin' ? formData.admin_scoped : false,
+                    admin_business_ids: formData.role === 'admin' && formData.admin_scoped ? formData.admin_business_ids : [],
                 }),
             })
 
@@ -670,34 +768,47 @@ export default function EmployeesPage() {
                 </div>
             </div>
 
-            {/* Search Bar */}
-            <div className="relative">
-                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-                <input
-                    type="text"
-                    placeholder="Search by name, email, or position..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="input pl-10 w-full"
-                />
-                {searchQuery && (
-                    <button
-                        onClick={() => setSearchQuery('')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                    </button>
-                )}
+            {/* Search Bar + Status Filter */}
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
+                <div className="relative flex-1">
+                    <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                    <input
+                        type="text"
+                        placeholder="Search by name, email, or position..."
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        className="input pl-10 w-full"
+                    />
+                    {searchQuery && (
+                        <button
+                            onClick={() => setSearchQuery('')}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                        >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    )}
+                </div>
+                <select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value as 'all' | 'active' | 'inactive')}
+                    className="input sm:w-44"
+                    aria-label="Filter by status"
+                >
+                    <option value="all">All Statuses</option>
+                    <option value="active">Active</option>
+                    <option value="inactive">Deactivated</option>
+                </select>
             </div>
 
             {/* Add Employee Modal */}
             {showModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl">
                         <div className="p-4 sm:p-6">
                             <h2 className="text-lg sm:text-xl font-bold mb-4">Add New Employee</h2>
                             <form onSubmit={handleAddSubmit} className="space-y-4">
@@ -807,6 +918,12 @@ export default function EmployeesPage() {
                                                     onChange={(e) => setFormData({ ...formData, date_of_birth: e.target.value })} />
                                             </div>
                                         </div>
+                                        <label className="flex items-start gap-2 cursor-pointer mt-1">
+                                            <input type="checkbox" className="mt-1 flex-shrink-0 accent-purple-600" />
+                                            <span className="text-xs text-gray-500 leading-relaxed">
+                                                By providing employee phone number, you confirm the employee consents to receive operational text messages from Playfunia (e.g., schedule assignments, task alerts, clock-in/out reminders, and event notifications). Consent is a condition of employment communication. Msg &amp; data rates may apply. Msg frequency varies. Employee may reply STOP to unsubscribe at any time.
+                                            </span>
+                                        </label>
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                             <div>
                                                 <label className="label">Position</label>
@@ -818,7 +935,8 @@ export default function EmployeesPage() {
                                                 <select className="input" value={formData.role}
                                                     onChange={(e) => setFormData({ ...formData, role: e.target.value })}>
                                                     <option value="employee">Employee</option>
-                                                    <option value="admin">Admin</option>
+                                                    {/* Scoped admins cannot create other admins */}
+                                                    {!isScopedAdmin && <option value="admin">Admin</option>}
                                                 </select>
                                             </div>
                                         </div>
@@ -843,18 +961,65 @@ export default function EmployeesPage() {
                                                     onChange={(e) => setFormData({ ...formData, shift_end: e.target.value })} />
                                             </div>
                                         </div>
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="label">Company Name</label>
-                                                <input type="text" className="input" value={formData.company_name}
-                                                    onChange={(e) => setFormData({ ...formData, company_name: e.target.value })} />
-                                            </div>
-                                            <div>
-                                                <label className="label">Work Location</label>
-                                                <input type="text" className="input" value={formData.work_location}
-                                                    onChange={(e) => setFormData({ ...formData, work_location: e.target.value })} />
+                                        <div>
+                                            <label className="label">Business / Location</label>
+                                            <div className="space-y-2 p-3 border rounded-lg max-h-48 overflow-y-auto">
+                                                {visibleBusinesses.map(b => (
+                                                    <label key={b.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                                                        <input type="checkbox"
+                                                            checked={formData.business_ids.includes(b.id)}
+                                                            onChange={(e) => {
+                                                                const ids = e.target.checked
+                                                                    ? [...formData.business_ids, b.id]
+                                                                    : formData.business_ids.filter(id => id !== b.id)
+                                                                setFormData({ ...formData, business_ids: ids })
+                                                            }}
+                                                            className="rounded border-gray-300" />
+                                                        {b.name}{b.location ? ` - ${b.location}` : ''}
+                                                    </label>
+                                                ))}
+                                                {businesses.length === 0 && <p className="text-sm text-muted-foreground">No businesses found</p>}
                                             </div>
                                         </div>
+
+                                        {/* Location-admin scope controls (super admin only) */}
+                                        {isSuperAdmin && formData.role === 'admin' && (
+                                            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-3">
+                                                <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                                                    <input type="checkbox" checked={formData.admin_scoped}
+                                                        onChange={(e) => setFormData({ ...formData, admin_scoped: e.target.checked })}
+                                                        className="rounded border-gray-300" />
+                                                    Restrict this admin to specific locations
+                                                </label>
+                                                <p className="text-xs text-gray-600">
+                                                    A location admin can only see and manage employees, schedules, tasks,
+                                                    attendance and onboarding for the locations selected below. They cannot
+                                                    manage roles, other locations, or company-wide settings.
+                                                </p>
+                                                {formData.admin_scoped && (
+                                                    <div>
+                                                        <label className="label">Locations this admin manages</label>
+                                                        <div className="space-y-2 p-3 border rounded-lg max-h-48 overflow-y-auto bg-white">
+                                                            {businesses.map(b => (
+                                                                <label key={b.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                                                                    <input type="checkbox"
+                                                                        checked={formData.admin_business_ids.includes(b.id)}
+                                                                        onChange={(e) => {
+                                                                            const ids = e.target.checked
+                                                                                ? [...formData.admin_business_ids, b.id]
+                                                                                : formData.admin_business_ids.filter(id => id !== b.id)
+                                                                            setFormData({ ...formData, admin_business_ids: ids })
+                                                                        }}
+                                                                        className="rounded border-gray-300" />
+                                                                    {b.name}{b.location ? ` - ${b.location}` : ''}
+                                                                </label>
+                                                            ))}
+                                                            {businesses.length === 0 && <p className="text-sm text-muted-foreground">No businesses found</p>}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
@@ -1003,13 +1168,15 @@ export default function EmployeesPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Edit Employee Modal */}
             {showEditModal && editingEmployee && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl">
                         <div className="p-4 sm:p-6">
                             <h2 className="text-lg sm:text-xl font-bold mb-2">Edit Employee</h2>
                             <p className="text-sm text-muted-foreground mb-4">
@@ -1101,9 +1268,11 @@ export default function EmployeesPage() {
                                             <div>
                                                 <label className="label">Role</label>
                                                 <select className="input" value={editFormData.role}
-                                                    onChange={(e) => setEditFormData({ ...editFormData, role: e.target.value })}>
+                                                    onChange={(e) => setEditFormData({ ...editFormData, role: e.target.value })}
+                                                    disabled={isScopedAdmin}>
                                                     <option value="employee">Employee</option>
-                                                    <option value="admin">Admin</option>
+                                                    {/* Scoped admins cannot change roles / create admins */}
+                                                    {(!isScopedAdmin || editFormData.role === 'admin') && <option value="admin">Admin</option>}
                                                 </select>
                                             </div>
                                             <div>
@@ -1136,18 +1305,65 @@ export default function EmployeesPage() {
                                                     onChange={(e) => setEditFormData({ ...editFormData, shift_end: e.target.value })} />
                                             </div>
                                         </div>
-                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                                            <div>
-                                                <label className="label">Company Name</label>
-                                                <input type="text" className="input" value={editFormData.company_name}
-                                                    onChange={(e) => setEditFormData({ ...editFormData, company_name: e.target.value })} />
-                                            </div>
-                                            <div>
-                                                <label className="label">Work Location</label>
-                                                <input type="text" className="input" value={editFormData.work_location}
-                                                    onChange={(e) => setEditFormData({ ...editFormData, work_location: e.target.value })} />
+                                        <div>
+                                            <label className="label">Business / Location</label>
+                                            <div className="space-y-2 p-3 border rounded-lg max-h-48 overflow-y-auto">
+                                                {visibleBusinesses.map(b => (
+                                                    <label key={b.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                                                        <input type="checkbox"
+                                                            checked={editFormData.business_ids.includes(b.id)}
+                                                            onChange={(e) => {
+                                                                const ids = e.target.checked
+                                                                    ? [...editFormData.business_ids, b.id]
+                                                                    : editFormData.business_ids.filter(id => id !== b.id)
+                                                                setEditFormData({ ...editFormData, business_ids: ids })
+                                                            }}
+                                                            className="rounded border-gray-300" />
+                                                        {b.name}{b.location ? ` - ${b.location}` : ''}
+                                                    </label>
+                                                ))}
+                                                {businesses.length === 0 && <p className="text-sm text-muted-foreground">No businesses found</p>}
                                             </div>
                                         </div>
+
+                                        {/* Location-admin scope controls (super admin only) */}
+                                        {isSuperAdmin && editFormData.role === 'admin' && (
+                                            <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-3">
+                                                <label className="flex items-center gap-2 text-sm font-medium cursor-pointer">
+                                                    <input type="checkbox" checked={editFormData.admin_scoped}
+                                                        onChange={(e) => setEditFormData({ ...editFormData, admin_scoped: e.target.checked })}
+                                                        className="rounded border-gray-300" />
+                                                    Restrict this admin to specific locations
+                                                </label>
+                                                <p className="text-xs text-gray-600">
+                                                    A location admin can only see and manage employees, schedules, tasks,
+                                                    attendance and onboarding for the locations selected below. They cannot
+                                                    manage roles, other locations, or company-wide settings.
+                                                </p>
+                                                {editFormData.admin_scoped && (
+                                                    <div>
+                                                        <label className="label">Locations this admin manages</label>
+                                                        <div className="space-y-2 p-3 border rounded-lg max-h-48 overflow-y-auto bg-white">
+                                                            {businesses.map(b => (
+                                                                <label key={b.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                                                                    <input type="checkbox"
+                                                                        checked={editFormData.admin_business_ids.includes(b.id)}
+                                                                        onChange={(e) => {
+                                                                            const ids = e.target.checked
+                                                                                ? [...editFormData.admin_business_ids, b.id]
+                                                                                : editFormData.admin_business_ids.filter(id => id !== b.id)
+                                                                            setEditFormData({ ...editFormData, admin_business_ids: ids })
+                                                                        }}
+                                                                        className="rounded border-gray-300" />
+                                                                    {b.name}{b.location ? ` - ${b.location}` : ''}
+                                                                </label>
+                                                            ))}
+                                                            {businesses.length === 0 && <p className="text-sm text-muted-foreground">No businesses found</p>}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
@@ -1312,13 +1528,15 @@ export default function EmployeesPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* View Employee Modal */}
             {showViewModal && viewingEmployee && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl">
                         <div className="p-4 sm:p-6">
                             <div className="flex justify-between items-start mb-4">
                                 <div className="flex items-center gap-4">
@@ -1347,8 +1565,11 @@ export default function EmployeesPage() {
                                         <div><span className="text-muted-foreground">Shift:</span> {viewingEmployee.shift_type || '-'}</div>
                                         <div><span className="text-muted-foreground">Shift Time:</span> {viewingEmployee.shift_start && viewingEmployee.shift_end
                                             ? `${formatTimeString(viewingEmployee.shift_start)} - ${formatTimeString(viewingEmployee.shift_end)}` : '-'}</div>
-                                        <div><span className="text-muted-foreground">Company:</span> {viewingEmployee.company_name || '-'}</div>
-                                        <div><span className="text-muted-foreground">Location:</span> {viewingEmployee.work_location || '-'}</div>
+                                        <div><span className="text-muted-foreground">Business:</span> {viewingEmployee.employee_businesses?.length
+                                            ? viewingEmployee.employee_businesses.map(eb =>
+                                                `${eb.businesses.name}${eb.businesses.location ? ' - ' + eb.businesses.location : ''}`
+                                            ).join(', ')
+                                            : '-'}</div>
                                     </div>
                                 </div>
 
@@ -1432,12 +1653,14 @@ export default function EmployeesPage() {
                             </div>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Delete Confirmation Modal */}
             {showDeleteModal && deletingEmployee && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4">
+                <div className="fixed inset-0 bg-black/50 z-[60] overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
                     <div className="bg-card rounded-lg shadow-lg w-full max-w-md">
                         <div className="p-4 sm:p-6">
                             <div className="flex items-center gap-3 mb-4">
@@ -1518,6 +1741,7 @@ export default function EmployeesPage() {
                             </div>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
@@ -1554,7 +1778,7 @@ export default function EmployeesPage() {
                                                 {emp.is_active ? 'Active' : 'Inactive'}
                                             </span>
                                             <span className={`badge ${emp.profiles?.role === 'admin' ? 'badge-default' : 'badge-outline'} text-xs`}>
-                                                {emp.profiles?.role || 'employee'}
+                                                {roleLabel(emp.profiles)}
                                             </span>
                                         </div>
                                     </div>
@@ -1589,7 +1813,7 @@ export default function EmployeesPage() {
                                         <th className="text-left p-3 sm:p-4 font-medium text-sm">Employee</th>
                                         <th className="text-left p-3 sm:p-4 font-medium text-sm">Position</th>
                                         <th className="text-left p-3 sm:p-4 font-medium text-sm">Shift</th>
-                                        <th className="text-left p-3 sm:p-4 font-medium text-sm">Location</th>
+                                        <th className="text-left p-3 sm:p-4 font-medium text-sm">Business</th>
                                         <th className="text-left p-3 sm:p-4 font-medium text-sm">Role</th>
                                         <th className="text-left p-3 sm:p-4 font-medium text-sm">Status</th>
                                         <th className="text-left p-3 sm:p-4 font-medium text-sm">Actions</th>
@@ -1621,14 +1845,15 @@ export default function EmployeesPage() {
                                                 )}
                                             </td>
                                             <td className="p-3 sm:p-4 text-sm">
-                                                <div>{emp.work_location || '-'}</div>
-                                                {emp.company_name && (
-                                                    <div className="text-xs text-muted-foreground">{emp.company_name}</div>
-                                                )}
+                                                {emp.employee_businesses?.length ? emp.employee_businesses.map(eb => (
+                                                    <div key={eb.business_id} className="text-xs">
+                                                        {eb.businesses.name}{eb.businesses.location ? ` - ${eb.businesses.location}` : ''}
+                                                    </div>
+                                                )) : '-'}
                                             </td>
                                             <td className="p-3 sm:p-4">
                                                 <span className={`badge ${emp.profiles?.role === 'admin' ? 'badge-default' : 'badge-secondary'}`}>
-                                                    {emp.profiles?.role || 'employee'}
+                                                    {roleLabel(emp.profiles)}
                                                 </span>
                                             </td>
                                             <td className="p-3 sm:p-4">

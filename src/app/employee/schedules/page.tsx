@@ -7,6 +7,7 @@ import { ScheduleStatus } from '@/types/supabase'
 import { scheduleNotifications } from '@/lib/notifications'
 import { getTodayNY, getDateNY, formatScheduleDate, formatTimeString } from '@/lib/utils'
 import { RichTextDisplay } from '@/components/RichTextEditor'
+import { ScheduleCalendar, type CalendarEntry } from '@/components/ScheduleCalendar'
 import useSWR from 'swr'
 
 // PERFORMANCE: Create client once at module level
@@ -48,6 +49,7 @@ const statusLabels: Record<ScheduleStatus, string> = {
 
 export default function EmployeeSchedulesPage() {
     const { user, employee, isLoading: authLoading } = useAuth()
+    const [viewMode, setViewMode] = useState<'list' | 'calendar'>('list')
     const [scheduleFilter, setScheduleFilter] = useState<'upcoming' | 'all' | 'pending'>('upcoming')
     const [processing, setProcessing] = useState<string | null>(null)
     const [showCancelModal, setShowCancelModal] = useState(false)
@@ -94,6 +96,33 @@ export default function EmployeeSchedulesPage() {
             dedupingInterval: 30000,
         }
     )
+
+    // Calendar view fetches the employee's full schedule history (small per-user
+    // dataset) so day/week/month navigation has data without re-fetching per range.
+    const { data: allSchedules = [] } = useSWR(
+        user?.id && viewMode === 'calendar' ? ['employee:all-schedules', user.id] : null,
+        async () => {
+            const { data, error } = await supabase
+                .from('schedules')
+                .select('*')
+                .eq('employee_id', user!.id)
+                .order('schedule_date', { ascending: true })
+            if (error) throw error
+            return (data || []) as Schedule[]
+        },
+        { revalidateOnFocus: false, keepPreviousData: true, dedupingInterval: 30000 }
+    )
+
+    const calendarEntries: CalendarEntry[] = (allSchedules as Schedule[]).map(s => ({
+        id: s.id,
+        employeeId: s.employee_id,
+        employeeName: employee?.display_name || 'Me',
+        date: s.schedule_date,
+        startTime: s.start_time,
+        endTime: s.end_time,
+        location: s.location,
+        status: s.status,
+    }))
 
     async function handleConfirm(scheduleId: string) {
         setProcessing(scheduleId)
@@ -193,11 +222,27 @@ export default function EmployeeSchedulesPage() {
                         View and manage your work schedules
                     </p>
                 </div>
-                {pendingCount > 0 && (
-                    <div className="px-3 py-1 rounded-full bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300 text-sm font-medium">
-                        {pendingCount} pending confirmation{pendingCount > 1 ? 's' : ''}
+                <div className="flex items-center gap-3">
+                    {pendingCount > 0 && (
+                        <div className="px-3 py-1 rounded-full bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300 text-sm font-medium">
+                            {pendingCount} pending confirmation{pendingCount > 1 ? 's' : ''}
+                        </div>
+                    )}
+                    <div className="flex rounded-lg border overflow-hidden">
+                        <button
+                            className={`px-3 py-1.5 text-sm ${viewMode === 'list' ? 'bg-primary text-primary-foreground' : 'bg-card hover:bg-muted'}`}
+                            onClick={() => setViewMode('list')}
+                        >
+                            List
+                        </button>
+                        <button
+                            className={`px-3 py-1.5 text-sm ${viewMode === 'calendar' ? 'bg-primary text-primary-foreground' : 'bg-card hover:bg-muted'}`}
+                            onClick={() => setViewMode('calendar')}
+                        >
+                            Calendar
+                        </button>
                     </div>
-                )}
+                </div>
             </div>
 
             {/* Shift Info Card */}
@@ -220,6 +265,12 @@ export default function EmployeeSchedulesPage() {
                 </div>
             )}
 
+            {viewMode === 'calendar' ? (
+                <div className="card p-4">
+                    <ScheduleCalendar entries={calendarEntries} title="My Schedule" />
+                </div>
+            ) : (
+            <>
             {/* Filter Tabs */}
             <div className="flex gap-2 flex-wrap">
                 {(['upcoming', 'pending', 'all'] as const).map((filter) => (
@@ -352,10 +403,13 @@ export default function EmployeeSchedulesPage() {
                     })}
                 </div>
             )}
+            </>
+            )}
 
             {/* Cancellation Request Modal */}
             {showCancelModal && cancellingSchedule && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
                     <div className="bg-card rounded-xl shadow-xl w-full max-w-md border">
                         <div className="p-6">
                             <h2 className="text-xl font-bold mb-4">Request Cancellation</h2>
@@ -402,6 +456,7 @@ export default function EmployeeSchedulesPage() {
                                 </div>
                             </form>
                         </div>
+                    </div>
                     </div>
                 </div>
             )}

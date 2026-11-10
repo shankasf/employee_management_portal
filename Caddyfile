@@ -3,6 +3,13 @@
 
 # Main Playfunia website - playfunia.com with HTTPS
 playfunia.com {
+    # SSE stream - must be before general API handler to avoid buffering
+    handle /api/admin/stream {
+        reverse_proxy 172.20.0.1:5001 {
+            flush_interval -1
+        }
+    }
+
     # API routes go to backend
     handle /api/* {
         reverse_proxy 172.20.0.1:5001
@@ -14,8 +21,20 @@ playfunia.com {
         reverse_proxy 172.20.0.1:8002
     }
 
-    # All other requests go to frontend
+    # All other requests go to frontend (CRA dev server). Its chunk files have
+    # no content hash and no Cache-Control, so browsers reused stale chunks after
+    # deploys (e.g. the admin dashboard chunk). Force revalidation — the dev
+    # server answers with cheap 304s via ETag when nothing changed.
+    handle /static/* {
+        header Cache-Control "no-cache"
+        reverse_proxy 172.20.0.1:3002
+    }
+    handle /*.hot-update.js {
+        header Cache-Control "no-cache"
+        reverse_proxy 172.20.0.1:3002
+    }
     handle {
+        header Cache-Control "no-cache"
         reverse_proxy 172.20.0.1:3002
     }
 
@@ -62,6 +81,35 @@ admin.playfunia.com {
     }
 
     # Security headers
+    # `microphone=(self)` is required by the in-app voice assistant.
+    # `geolocation=(self)` is required by clock-in / location capture.
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        Permissions-Policy "camera=(self), microphone=(self), geolocation=(self), payment=(self)"
+        -Server
+    }
+
+    # Health check endpoint
+    handle /health {
+        respond "OK" 200
+    }
+}
+
+# Toy Republic - toyrepublicusa.com with HTTPS
+toyrepublicusa.com {
+    reverse_proxy 172.20.0.1:3001
+
+    encode gzip zstd
+
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+
     header {
         X-Content-Type-Options "nosniff"
         X-Frame-Options "SAMEORIGIN"
@@ -69,11 +117,25 @@ admin.playfunia.com {
         Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
         Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(self)"
         -Server
+        -X-Powered-By
     }
+}
 
-    # Health check endpoint
-    handle /health {
-        respond "OK" 200
+# www redirect to apex
+www.toyrepublicusa.com {
+    redir https://toyrepublicusa.com{uri} permanent
+}
+
+# Playfunia voice assistant — Twilio Voice webhook (/twiml/incoming) +
+# OpenAI realtime.call.incoming webhook (/webhook). Proxies to the `voice`
+# service published on host port 8003. Needs a DNS A record:
+#   voice.playfunia.com  ->  72.62.162.219
+voice.playfunia.com {
+    reverse_proxy 172.20.0.1:8003
+    log {
+        output stdout
+        format console
+        level INFO
     }
 }
 

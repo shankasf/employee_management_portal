@@ -17,12 +17,9 @@ interface TimeCardEntry {
     total_hours: number | null
     break_minutes: number
     work_type: string
+    shift_timing: string | null
     clock_in_location_status: string | null
     clock_out_location_status: string | null
-    clock_in_lat: number | null
-    clock_in_lng: number | null
-    clock_out_lat: number | null
-    clock_out_lng: number | null
     clock_in_location_name: string | null
     clock_out_location_name: string | null
     notes: string | null
@@ -30,6 +27,7 @@ interface TimeCardEntry {
     early_checkout_flag: boolean
     actual_clock_out: string | null
     late_clock_out_minutes: number | null
+    edited_by_admin: boolean
 }
 
 function escapeHtml(str: string): string {
@@ -41,26 +39,6 @@ function escapeHtml(str: string): string {
         .replace(/'/g, '&#39;')
 }
 
-// In-memory geocode cache
-const geocodeCache = new Map<string, string>()
-
-async function resolveLocation(lat: number | null, lng: number | null): Promise<string | null> {
-    if (lat == null || lng == null) return null
-    const key = `${lat.toFixed(3)},${lng.toFixed(3)}`
-    if (geocodeCache.has(key)) return geocodeCache.get(key)!
-    try {
-        const res = await fetch(`/api/geocode?lat=${lat}&lng=${lng}`)
-        if (!res.ok) throw new Error('failed')
-        const data = await res.json()
-        const label = data.location || `${lat.toFixed(4)}, ${lng.toFixed(4)}`
-        geocodeCache.set(key, label)
-        return label
-    } catch {
-        const fallback = `${lat.toFixed(4)}, ${lng.toFixed(4)}`
-        geocodeCache.set(key, fallback)
-        return fallback
-    }
-}
 
 function countUniqueDays(entries: TimeCardEntry[]): number {
     const days = new Set<string>()
@@ -124,22 +102,7 @@ export default function EmployeeTimeCardPage() {
 
             if (error) throw error
 
-            const rawEntries = (data || []) as TimeCardEntry[]
-
-            // Resolve location names inside the fetcher
-            const entries = await Promise.all(rawEntries.map(async (entry) => {
-                const clockInName = entry.clock_in_location_status === 'captured'
-                    ? await resolveLocation(entry.clock_in_lat, entry.clock_in_lng)
-                    : null
-                const clockOutName = entry.clock_out_location_status === 'captured'
-                    ? await resolveLocation(entry.clock_out_lat, entry.clock_out_lng)
-                    : null
-                return {
-                    ...entry,
-                    clock_in_location_name: clockInName,
-                    clock_out_location_name: clockOutName,
-                }
-            }))
+            const entries = (data || []) as TimeCardEntry[]
 
             // Calculate totals
             let totalHours = 0
@@ -195,14 +158,14 @@ export default function EmployeeTimeCardPage() {
         const csvCell = (val: string) => `"${val.replace(/"/g, '""')}"`
         const csvRow = (cells: string[]) => cells.map(csvCell).join(',')
 
-        const headers = ['Date', 'Status', 'Type', 'Clock In', 'Clock Out', 'Actual Clock Out', 'Late Out (min)', 'Break', 'Hours', 'Clock In Location', 'Clock Out Location']
+        const headers = ['Date', 'Status', 'Shift Timing', 'Clock In', 'Clock Out', 'Actual Clock Out', 'Late Out (min)', 'Break', 'Hours', 'Clock In Location', 'Clock Out Location']
         const rows = timeCardEntries.map(entry => {
             const hours = entry.total_hours || 0
 
             return csvRow([
                 formatShortDate(entry.clock_in),
                 entry.clock_out ? 'Complete' : 'In Progress',
-                entry.work_type || 'Regular',
+                entry.shift_timing || 'Not set',
                 formatTime(entry.clock_in),
                 entry.clock_out ? formatTime(entry.clock_out) : '-',
                 entry.actual_clock_out ? formatTime(entry.actual_clock_out) : '',
@@ -444,7 +407,7 @@ export default function EmployeeTimeCardPage() {
                                 <tr className="bg-primary text-primary-foreground">
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Date</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Status</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Type</th>
+                                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Shift Timing</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Clock In</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Clock Out</th>
                                     <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider">Break</th>
@@ -470,8 +433,13 @@ export default function EmployeeTimeCardPage() {
                                                     {entry.clock_out ? 'Complete' : 'In Progress'}
                                                 </span>
                                             </td>
-                                            <td className="px-4 py-3 text-sm capitalize">{entry.work_type || 'Regular'}</td>
-                                            <td className="px-4 py-3 text-sm font-mono">{formatTime(entry.clock_in)}</td>
+                                            <td className="px-4 py-3 text-sm">{entry.shift_timing || 'Not set'}</td>
+                                            <td className="px-4 py-3 text-sm font-mono">
+                                                {formatTime(entry.clock_in)}
+                                                {entry.edited_by_admin && (
+                                                    <div className="text-xs text-blue-600 dark:text-blue-400 font-sans">Edited by Admin</div>
+                                                )}
+                                            </td>
                                             <td className="px-4 py-3 text-sm font-mono">
                                                 {entry.clock_out ? formatTime(entry.clock_out) : '-'}
                                                 {entry.actual_clock_out && (

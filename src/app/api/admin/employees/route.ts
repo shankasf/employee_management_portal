@@ -2,10 +2,10 @@ import { createClient } from '@supabase/supabase-js'
 import { createClient as createServerClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { sendWelcomeEmail, sendEmployeeCreatedNotification, sendEmployeeDeletedNotification } from '@/lib/email'
-import { sendWelcomeSMS, sendEmployeeCreatedSMS, sendEmployeeDeletedSMS } from '@/lib/sms'
 import { getCurrentNYTime } from '@/lib/utils'
 import { logActivity, getRequestInfo } from '@/lib/activity-log'
 import { serverLog } from '@/lib/server-log'
+import { getAdminContext, isEmployeeInScope } from '@/lib/auth/adminScope'
 
 // Create admin client with service role key
 function createAdminClient() {
@@ -35,13 +35,8 @@ export async function POST(request: NextRequest) {
         }
         serverLog.api('User authenticated', { email: user.email })
 
-        const { data: profile } = await supabase
-            .from('profiles')
-            .select('role')
-            .eq('id', user.id)
-            .single()
-
-        if ((profile as { role: string } | null)?.role !== 'admin') {
+        const ctx = await getAdminContext()
+        if (!ctx || ctx.role !== 'admin') {
             return NextResponse.json({ error: 'Forbidden - Admin only' }, { status: 403 })
         }
 
@@ -54,12 +49,14 @@ export async function POST(request: NextRequest) {
             display_name,
             position,
             shift_type,
-            role,
+            role: rawRole,
+            // Admin-scope fields (super-admin only)
+            admin_scoped: rawAdminScoped,
+            admin_business_ids: rawAdminBusinessIds,
             // New fields
             shift_start,
             shift_end,
-            company_name,
-            work_location,
+            business_ids: rawBusinessIds,
             date_of_birth,
             phone_number,
             street_address,
@@ -74,6 +71,26 @@ export async function POST(request: NextRequest) {
             emergency_contact_phone,
             hr_notes,
         } = body
+
+        // --- Privilege + scope enforcement on the CALLER ---
+        // Scoped admins can never create another admin, and may only assign
+        // employees to their own managed locations.
+        let role = rawRole
+        let business_ids = rawBusinessIds
+        if (ctx.isScoped) {
+            role = 'employee'
+            const managed = new Set(ctx.managedBusinessIds)
+            business_ids = Array.isArray(rawBusinessIds)
+                ? rawBusinessIds.filter((b: number) => managed.has(b))
+                : []
+        }
+
+        // Only super admins may create a scoped admin (admin_scoped + managed locations).
+        const makeScopedAdmin =
+            role === 'admin' && ctx.isSuperAdmin && rawAdminScoped === true
+        const adminBusinessIds: number[] = makeScopedAdmin && Array.isArray(rawAdminBusinessIds)
+            ? rawAdminBusinessIds.filter((b: unknown) => typeof b === 'number')
+            : []
 
         // Normalize email to lowercase to match Supabase auth behavior
         const normalizedEmail = email?.toLowerCase().trim()
@@ -127,7 +144,8 @@ export async function POST(request: NextRequest) {
                 email: normalizedEmail,
                 full_name,
                 role: role || 'employee',
-                status: 'active'
+                status: 'active',
+                admin_scoped: makeScopedAdmin,
             }, { onConflict: 'id' })
 
         if (profileError) {
@@ -151,8 +169,6 @@ export async function POST(request: NextRequest) {
                 shift_type: shift_type || 'full-time',
                 shift_start: shift_start || null,
                 shift_end: shift_end || null,
-                company_name: company_name || null,
-                work_location: work_location || null,
                 date_of_birth: date_of_birth || null,
                 phone_number: phone_number || null,
                 street_address: street_address || null,
@@ -200,6 +216,29 @@ export async function POST(request: NextRequest) {
 
         serverLog.db('Employee record verified successfully')
 
+        // Insert business assignments
+        if (Array.isArray(business_ids) && business_ids.length > 0) {
+            const { error: bizError } = await adminClient.from('employee_businesses').insert(
+                business_ids.map((bid: number) => ({ employee_id: userId, business_id: bid }))
+            )
+            if (bizError) {
+                serverLog.dbError('Business assignment failed', { error: bizError })
+                // Non-fatal: employee was created, just log the error
+                console.error('Business assignment failed:', bizError.message)
+            }
+        }
+
+        // Insert managed-location assignments for a newly created scoped admin.
+        if (makeScopedAdmin && adminBusinessIds.length > 0) {
+            const { error: adminBizError } = await adminClient.from('admin_businesses').insert(
+                adminBusinessIds.map((bid: number) => ({ admin_id: userId, business_id: bid }))
+            )
+            if (adminBizError) {
+                serverLog.dbError('Admin location assignment failed', { error: adminBizError })
+                console.error('Admin location assignment failed:', adminBizError.message)
+            }
+        }
+
         // Log the activity (non-blocking)
         const { ipAddress, userAgent } = getRequestInfo(request.headers)
         logActivity({
@@ -225,15 +264,6 @@ export async function POST(request: NextRequest) {
             tempPassword: password,
         }).catch(err => console.error('Failed to send welcome email:', err))
 
-        // Send welcome SMS if phone number provided (non-blocking)
-        if (phone_number) {
-            sendWelcomeSMS({
-                employeeName: display_name || full_name,
-                phone: phone_number,
-                tempPassword: password,
-            }).catch(err => console.error('Failed to send welcome SMS:', err))
-        }
-
         // Send notification to admin about new employee (non-blocking)
         sendEmployeeCreatedNotification({
             employeeName: display_name || full_name,
@@ -241,13 +271,6 @@ export async function POST(request: NextRequest) {
             position: position || undefined,
             createdAt: getCurrentNYTime(),
         }).catch(err => console.error('Failed to send admin notification:', err))
-
-        // Send SMS notification to admins about new employee (non-blocking)
-        sendEmployeeCreatedSMS({
-            employeeName: display_name || full_name,
-            email: normalizedEmail,
-            position: position || undefined,
-        }).catch(err => console.error('Failed to send admin SMS notification:', err))
 
         const duration = Date.now() - startTime
         serverLog.api('Employee created successfully', { email: normalizedEmail, duration, data: { userId } })
@@ -280,15 +303,16 @@ export async function DELETE(request: NextRequest) {
             return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
         }
 
-        const { data: profile } = await supabase
-            .from('profiles')
-            .select('role')
-            .eq('id', user.id)
-            .single()
-
-        if ((profile as { role: string } | null)?.role !== 'admin') {
+        const ctx = await getAdminContext()
+        if (!ctx || ctx.role !== 'admin') {
             serverLog.apiError('Forbidden - not admin', { email: user.email })
             return NextResponse.json({ error: 'Forbidden - Admin only' }, { status: 403 })
+        }
+
+        // Deleting an employee is a company-wide action (they may belong to
+        // multiple locations); restrict it to full admins.
+        if (ctx.isScoped) {
+            return NextResponse.json({ error: 'Forbidden - deleting employees requires full admin access' }, { status: 403 })
         }
 
         const { searchParams } = new URL(request.url)
@@ -302,13 +326,12 @@ export async function DELETE(request: NextRequest) {
         serverLog.api('Deleting employee', { data: { employeeId }, email: user.email })
         const adminClient = createAdminClient()
 
-        // Fetch employee data BEFORE deletion (for email/SMS notification)
+        // Fetch employee data BEFORE deletion (for email notification)
         const { data: employeeData } = await adminClient
             .from('employees')
             .select(`
                 display_name,
                 position,
-                phone_number,
                 profiles (
                     email,
                     full_name
@@ -322,10 +345,51 @@ export async function DELETE(request: NextRequest) {
         const empInfo = employeeData as any
         const employeeName = empInfo?.display_name || empInfo?.profiles?.full_name || 'Unknown'
         const employeeEmail = empInfo?.profiles?.email || null
-        const employeePhone = empInfo?.phone_number || null
         const employeePosition = empInfo?.position || undefined
 
-        // Delete sequentially: employees first (FK dependency), then profiles, then auth
+        // Delete all related records first (FK dependencies), then employees, profiles, auth
+
+        // Step 1: Delete from all dependent tables that reference this employee
+        const dependentDeletes = [
+            adminClient.from('employee_businesses').delete().eq('employee_id', employeeId),
+            adminClient.from('attendance_logs').delete().eq('employee_id', employeeId),
+            adminClient.from('task_instances').delete().eq('employee_id', employeeId),
+            adminClient.from('event_staff_assignments').delete().eq('employee_id', employeeId),
+            adminClient.from('transactions').delete().eq('handled_by_employee', employeeId),
+            adminClient.from('staff_notes').delete().eq('employee_id', employeeId),
+        ]
+        const dependentResults = await Promise.all(dependentDeletes)
+        for (const { error } of dependentResults) {
+            if (error) {
+                console.error('Dependent record delete error:', error)
+                return NextResponse.json({ error: 'Failed to delete related employee records' }, { status: 500 })
+            }
+        }
+
+        // Step 2: Delete schedule_email_logs (FK to schedules), then schedules
+        // First get schedule IDs for this employee
+        const { data: scheduleIds } = await adminClient
+            .from('schedules')
+            .select('id')
+            .eq('employee_id', employeeId)
+        if (scheduleIds && scheduleIds.length > 0) {
+            const ids = scheduleIds.map(s => s.id)
+            const { error: emailLogError } = await adminClient
+                .from('schedule_email_logs')
+                .delete()
+                .in('schedule_id', ids)
+            if (emailLogError) {
+                console.error('Schedule email log delete error:', emailLogError)
+                return NextResponse.json({ error: 'Failed to delete schedule email logs' }, { status: 500 })
+            }
+        }
+        const { error: scheduleDeleteError } = await adminClient.from('schedules').delete().eq('employee_id', employeeId)
+        if (scheduleDeleteError) {
+            console.error('Schedule delete error:', scheduleDeleteError)
+            return NextResponse.json({ error: 'Failed to delete schedule records' }, { status: 500 })
+        }
+
+        // Step 3: Delete employee record
         const { error: empDeleteError } = await adminClient.from('employees').delete().eq('id', employeeId)
         if (empDeleteError) {
             console.error('Employee delete error:', empDeleteError)
@@ -371,13 +435,6 @@ export async function DELETE(request: NextRequest) {
             }).catch(err => console.error('Failed to send deletion notification:', err))
         }
 
-        // Send SMS notifications (non-blocking)
-        sendEmployeeDeletedSMS({
-            employeeName,
-            email: employeeEmail || 'unknown',
-            phone: employeePhone || undefined,
-        }).catch(err => console.error('Failed to send deletion SMS:', err))
-
         const duration = Date.now() - startTime
         serverLog.api('Employee deleted successfully', { data: { employeeId, employeeName }, duration })
 
@@ -392,5 +449,92 @@ export async function DELETE(request: NextRequest) {
         return NextResponse.json({
             error: 'Internal server error'
         }, { status: 500 })
+    }
+}
+
+/**
+ * PATCH /api/admin/employees — sync an employee's location (business) tags.
+ * Body: { id: string, business_ids: number[] }
+ *
+ * Runs with the service role and DIFFS the assignments (insert missing,
+ * delete removed) instead of delete-all-then-insert. The old client-side
+ * delete+insert broke for scoped (location) admins: once the rows were
+ * deleted, the RLS insert check (which requires the employee to already be
+ * tagged to one of the admin's locations) failed, leaving the employee with
+ * no locations and invisible to that admin.
+ *
+ * Scoped admins may only add/remove tags within their managed locations;
+ * tags for other locations are left untouched.
+ */
+export async function PATCH(request: NextRequest) {
+    const startTime = Date.now()
+    try {
+        const ctx = await getAdminContext()
+        if (!ctx) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+        if (ctx.role !== 'admin') return NextResponse.json({ error: 'Forbidden - Admin only' }, { status: 403 })
+
+        const body = await request.json()
+        const employeeId: unknown = body?.id
+        const rawIds: unknown = body?.business_ids
+        if (typeof employeeId !== 'string' || !employeeId) {
+            return NextResponse.json({ error: 'Employee ID required' }, { status: 400 })
+        }
+        if (!Array.isArray(rawIds)) {
+            return NextResponse.json({ error: 'business_ids must be an array' }, { status: 400 })
+        }
+        const requested = Array.from(new Set(rawIds.filter((b): b is number => Number.isInteger(b))))
+
+        if (ctx.isScoped && !(await isEmployeeInScope(ctx, employeeId))) {
+            return NextResponse.json({ error: 'Forbidden - employee is not in your locations' }, { status: 403 })
+        }
+
+        const adminClient = createAdminClient()
+        const { data: currentRows, error: readError } = await adminClient
+            .from('employee_businesses')
+            .select('business_id')
+            .eq('employee_id', employeeId)
+        if (readError) {
+            serverLog.dbError('Failed to read business assignments', { error: readError })
+            return NextResponse.json({ error: 'Failed to read location assignments' }, { status: 500 })
+        }
+        const current = new Set((currentRows || []).map(r => r.business_id as number))
+
+        // Scoped admins can only touch their managed locations.
+        const editable = ctx.isScoped ? new Set(ctx.managedBusinessIds) : null
+        const canEdit = (b: number) => !editable || editable.has(b)
+
+        const toInsert = requested.filter(b => !current.has(b) && canEdit(b))
+        const toDelete = Array.from(current).filter(b => !requested.includes(b) && canEdit(b))
+
+        // Insert first, then delete, so the employee never transiently has zero tags.
+        if (toInsert.length > 0) {
+            const { error } = await adminClient
+                .from('employee_businesses')
+                .insert(toInsert.map(bid => ({ employee_id: employeeId, business_id: bid })))
+            if (error) {
+                serverLog.dbError('Failed to add business assignments', { error })
+                return NextResponse.json({ error: 'Failed to add location assignments' }, { status: 500 })
+            }
+        }
+        if (toDelete.length > 0) {
+            const { error } = await adminClient
+                .from('employee_businesses')
+                .delete()
+                .eq('employee_id', employeeId)
+                .in('business_id', toDelete)
+            if (error) {
+                serverLog.dbError('Failed to remove business assignments', { error })
+                return NextResponse.json({ error: 'Failed to remove location assignments' }, { status: 500 })
+            }
+        }
+
+        serverLog.api('Employee locations synced', {
+            duration: Date.now() - startTime,
+            data: { employeeId, added: toInsert, removed: toDelete },
+        })
+        return NextResponse.json({ success: true, added: toInsert, removed: toDelete })
+    } catch (error) {
+        serverLog.apiError('Error syncing employee locations', { error, duration: Date.now() - startTime })
+        return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
     }
 }

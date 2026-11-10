@@ -15,6 +15,13 @@ interface ResumableUploadOptions {
   bucketName: string
   objectName: string
   file: File
+  /**
+   * Cache-Control max-age in seconds. Defaults to 31536000 (1 year) since
+   * uploaded objects are content-addressed by timestamp and never overwritten,
+   * so they're effectively immutable. Pass a smaller value for short-lived
+   * media if needed.
+   */
+  cacheControl?: string
   onProgress?: (percentage: number) => void
   onOffline?: (percentage: number) => void
   onOnline?: (percentage: number) => void
@@ -34,6 +41,7 @@ export function resumableUpload({
   bucketName,
   objectName,
   file,
+  cacheControl = '31536000',
   onProgress,
   onOffline,
   onOnline,
@@ -77,7 +85,7 @@ export function resumableUpload({
           bucketName,
           objectName,
           contentType: file.type,
-          cacheControl: '3600',
+          cacheControl,
         },
         onShouldRetry(err) {
           const status = err.originalResponse ? err.originalResponse.getStatus() : 0

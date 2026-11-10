@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
-import { createClient as createServerSupabase } from '@/lib/supabase/server'
+import { requireAdmin, getScopedEmployeeIds } from '@/lib/auth/adminScope'
 
 function createAdminClient() {
   return createClient(
@@ -11,26 +11,18 @@ function createAdminClient() {
 
 export async function GET(request: NextRequest) {
   try {
-    // Verify user is authenticated and is admin
-    const supabase = await createServerSupabase()
-    const { data: { user } } = await supabase.auth.getUser()
+    // Verify user is authenticated and is admin (any tier)
+    const gate = await requireAdmin()
+    if (!gate.ok) return gate.response
+    const { ctx } = gate
 
-    if (!user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    // Scoped admins may only see task instances for their locations' employees.
+    const scopedEmployeeIds = await getScopedEmployeeIds(ctx)
+    if (scopedEmployeeIds !== null && scopedEmployeeIds.length === 0) {
+      return NextResponse.json({ data: [] })
     }
 
     const supabaseAdmin = createAdminClient()
-
-    // Check if user is admin
-    const { data: profile } = await supabaseAdmin
-      .from('profiles')
-      .select('role')
-      .eq('id', user.id)
-      .single()
-
-    if (profile?.role !== 'admin') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
-    }
 
     // Get query params
     const { searchParams } = new URL(request.url)
@@ -96,6 +88,10 @@ export async function GET(request: NextRequest) {
     }
     if (employeeId && employeeId !== 'all') {
       query = query.eq('employee_id', employeeId)
+    }
+    // Enforce location scope for scoped admins.
+    if (scopedEmployeeIds !== null) {
+      query = query.in('employee_id', scopedEmployeeIds)
     }
 
     const { data, error } = await query.limit(500)

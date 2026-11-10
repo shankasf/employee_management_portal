@@ -23,7 +23,8 @@ function getNYMinutesSinceMidnight(): number {
     minute: '2-digit',
   })
   const [h, m] = nyTimeStr.split(':').map(Number)
-  return h * 60 + m
+  // en-US with hour12:false reports midnight as "24:00" — normalize to 0
+  return (h % 24) * 60 + m
 }
 
 /**

@@ -288,7 +288,17 @@ export function useEmployees(showInactive = false) {
             email,
             full_name,
             role,
-            status
+            status,
+            is_super_admin,
+            admin_scoped
+          ),
+          employee_businesses (
+            business_id,
+            businesses (
+              id,
+              name,
+              location
+            )
           )
         `)
         .order('display_name')
@@ -448,6 +458,36 @@ export function useTaskInstances(filters?: {
   )
 }
 
+export interface ScheduleLocation {
+  id: number
+  name: string
+  location: string | null
+  label: string
+}
+
+/**
+ * Fetch the list of scheduling locations (sourced from the businesses table).
+ * Returns labels in the form "Name - Location".
+ */
+export function useLocations() {
+  const key = useAuthGatedKey(['schedules:locations'])
+
+  return useSWR<ScheduleLocation[]>(
+    key,
+    async () => {
+      const response = await fetch('/api/schedules/locations')
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || 'Failed to fetch locations')
+      }
+      const { locations } = await response.json()
+      return (locations || []) as ScheduleLocation[]
+    },
+    // Locations rarely change — cache aggressively
+    { ...getDefaultConfig(), dedupingInterval: 300000, revalidateOnFocus: false }
+  )
+}
+
 /**
  * Fetch all policies
  */
@@ -539,7 +579,7 @@ export function useOpenAttendance(userId: string | undefined) {
       // Direct query (faster than RPC with fallback)
       const { data, error } = await supabase
         .from('attendance_logs')
-        .select('id, clock_in')
+        .select('id, clock_in, break_start, break_minutes')
         .eq('employee_id', userId)
         .is('clock_out', null)
         .order('clock_in', { ascending: false })
@@ -833,6 +873,39 @@ export function useSchedules(filters?: {
       const { data, error } = await query.limit(500)
       if (error) throw error
       return data || []
+    },
+    getDefaultConfig()
+  )
+}
+
+/**
+ * Lightweight schedule rows for the scheduled-hours / overtime report.
+ * Pages through results instead of capping them, so a month of shifts for the
+ * whole team is never silently truncated (which would under-report hours).
+ */
+export function useScheduleHours(startDate: string, endDate: string) {
+  const gatedKey = useAuthGatedKey(['admin:schedules:hours', startDate, endDate])
+  const key = startDate && endDate ? gatedKey : null
+
+  return useSWR(
+    key,
+    async () => {
+      const PAGE_SIZE = 1000
+      const rows: Array<{ id: string; employee_id: string; schedule_date: string; start_time: string; end_time: string; status: string }> = []
+      for (let from = 0; ; from += PAGE_SIZE) {
+        const { data, error } = await supabase
+          .from('schedules')
+          .select('id, employee_id, schedule_date, start_time, end_time, status')
+          .gte('schedule_date', startDate)
+          .lte('schedule_date', endDate)
+          .order('schedule_date', { ascending: true })
+          .order('id', { ascending: true })
+          .range(from, from + PAGE_SIZE - 1)
+        if (error) throw error
+        rows.push(...(data || []))
+        if (!data || data.length < PAGE_SIZE) break
+      }
+      return rows
     },
     getDefaultConfig()
   )

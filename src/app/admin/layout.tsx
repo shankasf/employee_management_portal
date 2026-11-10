@@ -4,10 +4,12 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useAuth } from '@/contexts/AuthContext'
 import { ReactNode, useState, useEffect, useMemo, useRef } from 'react'
+import useSWR from 'swr'
 import { logPageView, logButtonClick } from '@/lib/usage-log'
-import { getPublicProfilePicUrl } from '@/lib/utils'
+import { getProfilePicSrc } from '@/lib/utils'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { startUpload, logValidationRejection } from '@/lib/upload-logger'
+import Chatbot from '@/components/Chatbot'
 
 // Client-side logging helper
 const log = (message: string, data?: Record<string, unknown>) => {
@@ -26,36 +28,108 @@ interface NavItem {
 
 const adminNavItems: NavItem[] = [
     { name: 'Dashboard', href: '/admin', icon: '📊' },
+    { name: 'Notifications', href: '/admin/notifications', icon: '🔔' },
     { name: 'Employees', href: '/admin/employees', icon: '👥' },
-    { name: 'Schedules', href: '/admin/schedules', icon: '📅' },
+    { name: 'Org Chart', href: '/admin/org-chart', icon: '🗂️' },
+    {
+        name: 'Schedules', href: '/admin/schedules', icon: '📅',
+        children: [
+            { name: 'Calendar View', href: '/admin/schedule-calendar', icon: '🗓️' },
+        ],
+    },
+    { name: 'Employee Calendar', href: '/admin/employee-calendar', icon: '📆' },
     { name: 'Tasks', href: '/admin/tasks', icon: '✅' },
     { name: 'My Tasks', href: '/admin/my-tasks', icon: '📋' },
     { name: 'Events', href: '/admin/events', icon: '🎉' },
     { name: 'Attendance', href: '/admin/attendance', icon: '⏰' },
+    { name: 'Clock In/Out', href: '/admin/clock', icon: '🕓' },
+    { name: 'My Attendance', href: '/admin/my-attendance', icon: '📍' },
+    { name: 'My Schedule', href: '/admin/my-schedule', icon: '🗓️' },
+    { name: 'My Calendar', href: '/admin/my-calendar', icon: '📆' },
     { name: 'Time Card', href: '/admin/timecard', icon: '🕐' },
     { name: 'Reports', href: '/admin/reports', icon: '📈' },
-    { name: 'Policies', href: '/admin/policies', icon: '📋' },
+    { name: 'Important Messages', href: '/admin/policies', icon: '📋' },
+    {
+        name: 'Onboarding', href: '/admin/onboarding', icon: '📚',
+        children: [
+            { name: 'Progress', href: '/admin/onboarding/progress', icon: '📊' },
+        ],
+    },
+    { name: 'My Onboarding', href: '/admin/my-onboarding', icon: '🎓' },
     {
         name: 'Activity Logs', href: '/admin/activity-logs', icon: '📜',
         children: [
             { name: 'Clock Logs', href: '/admin/clock-debug-logs', icon: '🔍' },
         ],
     },
+    { name: 'Settings', href: '/admin/settings', icon: '⚙️' },
 ]
+
+// Top-level nav hrefs hidden from scoped (location) admins — company-wide sections.
+const SCOPED_ADMIN_HIDDEN_HREFS = new Set<string>([
+    '/admin/events',
+    '/admin/reports',
+    '/admin/policies',
+    '/admin/activity-logs',
+])
 
 export default function AdminLayout({ children }: { children: ReactNode }) {
     const pathname = usePathname()
-    const { profile, employee, signOut, isLoading, user, refreshProfile } = useAuth()
+    const { profile, employee, signOut, isLoading, user, refreshProfile, isScopedAdmin } = useAuth()
+
+    // Scoped admins see a reduced nav (no company-wide sections).
+    const visibleNavItems = useMemo(
+        () => (isScopedAdmin
+            ? adminNavItems.filter((item) => !SCOPED_ADMIN_HIDDEN_HREFS.has(item.href))
+            : adminNavItems),
+        [isScopedAdmin],
+    )
     const [sidebarOpen, setSidebarOpen] = useState(false)
     const [signingOut, setSigningOut] = useState(false)
     const [loadingTimeout, setLoadingTimeout] = useState(false)
     const [profilePicError, setProfilePicError] = useState(false)
     const [uploadingPic, setUploadingPic] = useState(false)
     const fileInputRef = useRef<HTMLInputElement>(null)
+
+    // Onboarding completion badge (unacknowledged)
+    const { data: onboardingBadge } = useSWR<{ count: number }>(
+        user && profile?.role === 'admin' ? '/api/admin/onboarding/badge' : null,
+        async (url: string) => {
+            const res = await fetch(url, { credentials: 'include' })
+            if (!res.ok) return { count: 0 }
+            return res.json()
+        },
+        { refreshInterval: 60_000, revalidateOnFocus: true }
+    )
+    const onboardingCount = onboardingBadge?.count || 0
+
+    // The admin's OWN pending training (admins are employees too).
+    const { data: myTraining } = useSWR<{ total_pending: number }>(
+        user ? '/api/onboarding/pending' : null,
+        async (url: string) => {
+            const res = await fetch(url, { credentials: 'include' })
+            if (!res.ok) return { total_pending: 0 }
+            return res.json()
+        },
+        { refreshInterval: 60_000, revalidateOnFocus: true }
+    )
+    const myOnboardingCount = myTraining?.total_pending || 0
+
+    // Unread notifications badge (shares the SWR cache with the notifications page)
+    const { data: notifData } = useSWR<{ unreadCount: number }>(
+        user ? '/api/notifications' : null,
+        async (url: string) => {
+            const res = await fetch(url, { credentials: 'include' })
+            if (!res.ok) return { unreadCount: 0 }
+            return res.json()
+        },
+        { refreshInterval: 60_000, revalidateOnFocus: true }
+    )
+    const notifCount = notifData?.unreadCount || 0
     // Profile picture: public URL (no signing/expiry needed) with metadata fallback
     const profilePicUrl = useMemo(() => {
         if (employee?.profile_picture_url) {
-            return getPublicProfilePicUrl(employee.profile_picture_url)
+            return getProfilePicSrc(employee.profile_picture_url)
         }
         return user?.user_metadata?.avatar_url || user?.user_metadata?.picture || null
     }, [employee?.profile_picture_url, user?.user_metadata?.avatar_url, user?.user_metadata?.picture])
@@ -224,7 +298,7 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
 
                     {/* Navigation */}
                     <nav className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-1">
-                        {adminNavItems.map((item) => {
+                        {visibleNavItems.map((item) => {
                             const isParentActive = pathname === item.href || (item.children?.some(c => pathname === c.href))
                             return (
                                 <div key={item.href}>
@@ -238,7 +312,22 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
                                         onClick={() => setSidebarOpen(false)}
                                     >
                                         <span className="text-base sm:text-lg">{item.icon}</span>
-                                        {item.name}
+                                        <span className="flex-1">{item.name}</span>
+                                        {item.href === '/admin/onboarding' && onboardingCount > 0 && (
+                                            <span className="ml-auto bg-primary text-primary-foreground text-xs font-semibold rounded-full px-2 py-0.5 min-w-[1.25rem] text-center">
+                                                {onboardingCount > 99 ? '99+' : onboardingCount}
+                                            </span>
+                                        )}
+                                        {item.href === '/admin/my-onboarding' && myOnboardingCount > 0 && (
+                                            <span className="ml-auto bg-primary text-primary-foreground text-xs font-semibold rounded-full px-2 py-0.5 min-w-[1.25rem] text-center">
+                                                {myOnboardingCount > 99 ? '99+' : myOnboardingCount}
+                                            </span>
+                                        )}
+                                        {item.href === '/admin/notifications' && notifCount > 0 && (
+                                            <span className="ml-auto bg-primary text-primary-foreground text-xs font-semibold rounded-full px-2 py-0.5 min-w-[1.25rem] text-center">
+                                                {notifCount > 99 ? '99+' : notifCount}
+                                            </span>
+                                        )}
                                     </Link>
                                     {item.children && isParentActive && (
                                         <div className="ml-7 mt-1 space-y-1">
@@ -351,6 +440,10 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
                 {/* Page content */}
                 <main className="p-3 sm:p-4 lg:p-6 xl:p-8 safe-bottom">{children}</main>
             </div>
+
+            {/* Floating admin assistant — hidden on the dedicated full-page route
+             * (which renders an inline copy of the same component). */}
+            {pathname !== '/admin/assistant' && profile?.role === 'admin' && <Chatbot mode="admin" />}
         </div>
     )
 }

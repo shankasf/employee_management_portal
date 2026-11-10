@@ -1,101 +1,342 @@
 /**
- * SMS service using Twilio for sending notifications.
- * Mirrors the email notification system to provide SMS alongside emails.
+ * SMS service using Twilio for A2P 10DLC operational SMS to employees.
+ *
+ * Campaign: CTU2FPY (Low Volume Mixed). Approved employee use cases:
+ *   1. Work schedule assignments
+ *   2. Task assignment alerts
+ *   3. Clock-in / clock-out reminders
+ *
+ * All other employee notifications (welcome, password reset, deletion,
+ * events, policies, admin pings) intentionally go via email only — they
+ * are not part of the approved campaign and would risk carrier filtering.
+ *
+ * Every message is sent through the registered Messaging Service SID so
+ * it is attributed to the approved campaign, prefixed with "Playfunia",
+ * and ends with "Reply STOP to opt out." for compliance.
  */
 
 import twilio from 'twilio'
-import { createServiceClient } from './supabase/server'
+import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
-// Twilio configuration from environment variables
 const accountSid = process.env.TWILIO_ACCOUNT_SID || ''
 const authToken = process.env.TWILIO_AUTH_TOKEN || ''
+const apiKeySid = process.env.TWILIO_API_KEY_SID || ''
+const apiKeySecret = process.env.TWILIO_API_KEY_SECRET || ''
 const twilioPhoneNumber = process.env.TWILIO_PHONE_NUMBER || ''
+const messagingServiceSid = process.env.TWILIO_MESSAGING_SERVICE_SID || ''
 
-// Initialize Twilio client (lazy initialization to avoid errors when env vars not set)
+const STOP_TRAILER = 'Reply STOP to opt out.'
+
+// Twilio error code returned when sending to a recipient who has opted out (STOP).
+const TWILIO_UNSUBSCRIBED_CODE = 21610
+
 let twilioClient: twilio.Twilio | null = null
 
-function getTwilioClient(): twilio.Twilio | null {
-  if (!accountSid || !authToken) {
-    console.warn('[SMS] Twilio credentials not configured')
+// ============================================================
+// Supabase service-role client (no cookie context — safe in libs/cron)
+// Used for the SMS unsubscribe registry and send logging.
+// ============================================================
+let supabaseAdmin: SupabaseClient | null = null
+
+function getSupabaseAdmin(): SupabaseClient | null {
+  if (supabaseAdmin) return supabaseAdmin
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) {
+    console.warn('[SMS] Supabase service credentials missing — unsubscribe/logging disabled')
     return null
   }
-  if (!twilioClient) {
-    twilioClient = twilio(accountSid, authToken)
+  supabaseAdmin = createClient(url, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+  return supabaseAdmin
+}
+
+/** Message category, persisted to sms_logs for auditing. */
+export type SMSMessageType =
+  | 'schedule_assigned'
+  | 'schedule_confirmed'
+  | 'cancellation_approved'
+  | 'admin_cancelled'
+  | 'schedule_deleted'
+  | 'task_assigned'
+  | 'task_deadline_reminder'
+  | 'clock_in_reminder'
+  | 'clock_out_reminder'
+  | 'other'
+
+type SMSLogStatus = 'sent' | 'failed' | 'skipped_unsubscribed' | 'invalid_number'
+
+/**
+ * Fire-and-forget insert into sms_logs. Never throws — logging must never break
+ * the notification flow.
+ */
+async function logSMS(entry: {
+  phone: string
+  messageType: SMSMessageType
+  body: string
+  status: SMSLogStatus
+  twilioSid?: string | null
+  errorCode?: string | number | null
+  errorMessage?: string | null
+}): Promise<void> {
+  try {
+    const db = getSupabaseAdmin()
+    if (!db) return
+    const { error } = await db.from('sms_logs').insert({
+      phone: entry.phone,
+      message_type: entry.messageType,
+      body: entry.body,
+      status: entry.status,
+      twilio_sid: entry.twilioSid ?? null,
+      error_code: entry.errorCode != null ? String(entry.errorCode) : null,
+      error_message: entry.errorMessage ?? null,
+    })
+    if (error) console.error('[SMS] Failed to write sms_logs:', error.message)
+  } catch (err) {
+    console.error('[SMS] Exception writing sms_logs:', err instanceof Error ? err.message : err)
   }
+}
+
+/**
+ * Returns true if the number is currently opted out (active unsubscribe row).
+ * On any DB/credential error we return false (fail-open) so a transient DB
+ * problem never blocks legitimate operational SMS — the 21610 guard at send
+ * time still protects us.
+ */
+async function isUnsubscribed(phone: string): Promise<boolean> {
+  try {
+    const db = getSupabaseAdmin()
+    if (!db) return false
+    const { data, error } = await db
+      .from('sms_unsubscribes')
+      .select('phone')
+      .eq('phone', phone)
+      .eq('active', true)
+      .maybeSingle()
+    if (error) {
+      console.error('[SMS] Unsubscribe lookup failed:', error.message)
+      return false
+    }
+    return !!data
+  } catch (err) {
+    console.error('[SMS] Exception in unsubscribe lookup:', err instanceof Error ? err.message : err)
+    return false
+  }
+}
+
+/**
+ * Record (or refresh) an opt-out in the registry. Idempotent via upsert on the
+ * unique `phone` column. Used both by the 21610 capture path and the inbound
+ * STOP webhook.
+ */
+export async function recordUnsubscribe(
+  phone: string,
+  source: 'twilio_21610' | 'inbound_stop' | 'manual',
+  opts?: { reason?: string; messageSid?: string },
+): Promise<void> {
+  const formatted = formatPhoneNumber(phone) || phone
+  try {
+    const db = getSupabaseAdmin()
+    if (!db) return
+    const { error } = await db.from('sms_unsubscribes').upsert(
+      {
+        phone: formatted,
+        active: true,
+        reason: opts?.reason ?? null,
+        source,
+        last_message_sid: opts?.messageSid ?? null,
+        unsubscribed_at: new Date().toISOString(),
+        resubscribed_at: null,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'phone' },
+    )
+    if (error) console.error('[SMS] Failed to record unsubscribe:', error.message)
+    else console.warn(`[SMS] Recorded opt-out for ${formatted} (source=${source})`)
+  } catch (err) {
+    console.error('[SMS] Exception recording unsubscribe:', err instanceof Error ? err.message : err)
+  }
+}
+
+/**
+ * Record an opt-in (START/UNSTOP), flipping the registry row to inactive so the
+ * number can be texted again. Keeps the row for audit history.
+ */
+export async function recordResubscribe(
+  phone: string,
+  opts?: { messageSid?: string },
+): Promise<void> {
+  const formatted = formatPhoneNumber(phone) || phone
+  try {
+    const db = getSupabaseAdmin()
+    if (!db) return
+    const { error } = await db
+      .from('sms_unsubscribes')
+      .update({
+        active: false,
+        source: 'inbound_start',
+        last_message_sid: opts?.messageSid ?? null,
+        resubscribed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('phone', formatted)
+    if (error) console.error('[SMS] Failed to record resubscribe:', error.message)
+    else console.log(`[SMS] Recorded opt-in for ${formatted}`)
+  } catch (err) {
+    console.error('[SMS] Exception recording resubscribe:', err instanceof Error ? err.message : err)
+  }
+}
+
+function getTwilioClient(): twilio.Twilio | null {
+  if (twilioClient) return twilioClient
+
+  if (!accountSid) {
+    console.warn('[SMS] TWILIO_ACCOUNT_SID not configured — SMS disabled')
+    return null
+  }
+
+  // Prefer API key auth (revocable, preferred for prod). Fall back to auth token.
+  if (apiKeySid && apiKeySecret) {
+    twilioClient = twilio(apiKeySid, apiKeySecret, { accountSid })
+  } else if (authToken) {
+    twilioClient = twilio(accountSid, authToken)
+  } else {
+    console.warn('[SMS] No Twilio credentials configured — SMS disabled')
+    return null
+  }
+
   return twilioClient
 }
 
 interface SendSMSOptions {
   to: string | string[]
   body: string
+  /** Category persisted to sms_logs. Defaults to 'other'. */
+  messageType?: SMSMessageType
 }
 
 /**
- * Format phone number to E.164 format for Twilio
- * Assumes US numbers if no country code provided
+ * Format phone number to E.164. Assumes US if no country code.
  */
 function formatPhoneNumber(phone: string): string | null {
   if (!phone) return null
-
-  // Remove all non-digit characters except leading +
   let cleaned = phone.replace(/[^\d+]/g, '')
-
-  // If it doesn't start with +, assume US number
   if (!cleaned.startsWith('+')) {
-    // Remove leading 1 if present (for numbers like 11234567890)
     if (cleaned.startsWith('1') && cleaned.length === 11) {
       cleaned = cleaned.substring(1)
     }
-    // Add US country code
     if (cleaned.length === 10) {
       cleaned = '+1' + cleaned
     }
   }
-
-  // Validate E.164 format (should be + followed by 10-15 digits)
-  if (/^\+\d{10,15}$/.test(cleaned)) {
-    return cleaned
-  }
-
+  if (/^\+\d{10,15}$/.test(cleaned)) return cleaned
   console.warn(`[SMS] Invalid phone number format: ${phone}`)
   return null
 }
 
 /**
- * Send an SMS using Twilio
+ * Send an SMS via the approved A2P 10DLC Messaging Service.
+ * Falls back to the registered phone number if the service SID is not set.
  */
 export async function sendSMS(options: SendSMSOptions): Promise<{ success: boolean; error?: string }> {
   const client = getTwilioClient()
-  if (!client) {
-    return { success: false, error: 'Twilio not configured' }
-  }
+  if (!client) return { success: false, error: 'Twilio not configured' }
 
-  if (!twilioPhoneNumber) {
-    return { success: false, error: 'Twilio phone number not configured' }
+  if (!messagingServiceSid && !twilioPhoneNumber) {
+    return { success: false, error: 'No Twilio sender configured (messaging service or phone number)' }
   }
 
   const recipients = Array.isArray(options.to) ? options.to : [options.to]
+  const messageType: SMSMessageType = options.messageType ?? 'other'
   const results: { success: boolean; phone: string; error?: string }[] = []
 
   for (const recipient of recipients) {
     const formattedPhone = formatPhoneNumber(recipient)
     if (!formattedPhone) {
+      console.warn(`[SMS] Invalid phone number, not sending: ${recipient}`)
+      await logSMS({
+        phone: recipient,
+        messageType,
+        body: options.body,
+        status: 'invalid_number',
+        errorMessage: 'Invalid phone number format',
+      })
       results.push({ success: false, phone: recipient, error: 'Invalid phone number' })
       continue
     }
 
-    try {
-      const message = await client.messages.create({
+    // Compliance guard: never attempt delivery to a number that has opted out.
+    // This is what prevents the recurring Twilio 21610 errors.
+    if (await isUnsubscribed(formattedPhone)) {
+      console.warn(`[SMS] Skipping ${formattedPhone} — recipient is unsubscribed (opted out)`)
+      await logSMS({
+        phone: formattedPhone,
+        messageType,
         body: options.body,
-        from: twilioPhoneNumber,
-        to: formattedPhone,
+        status: 'skipped_unsubscribed',
+        errorCode: TWILIO_UNSUBSCRIBED_CODE,
+        errorMessage: 'Recipient has opted out (STOP); send suppressed locally',
       })
+      // Treat as "handled" so a single opted-out recipient in a batch does not
+      // mark the whole notification as failed.
+      results.push({ success: true, phone: formattedPhone })
+      continue
+    }
 
-      console.log(`[SMS] Message sent successfully: ${message.sid} to ${formattedPhone}`)
+    try {
+      const messageOptions: {
+        body: string
+        to: string
+        messagingServiceSid?: string
+        from?: string
+      } = {
+        body: options.body,
+        to: formattedPhone,
+      }
+
+      // Prefer Messaging Service SID — required for A2P 10DLC campaign attribution.
+      if (messagingServiceSid) {
+        messageOptions.messagingServiceSid = messagingServiceSid
+      } else {
+        messageOptions.from = twilioPhoneNumber
+      }
+
+      const message = await client.messages.create(messageOptions)
+
+      console.log(`[SMS] Sent ${message.sid} to ${formattedPhone} (${messageType})`)
+      await logSMS({
+        phone: formattedPhone,
+        messageType,
+        body: options.body,
+        status: 'sent',
+        twilioSid: message.sid,
+      })
       results.push({ success: true, phone: formattedPhone })
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      console.error(`[SMS] Failed to send to ${formattedPhone}:`, error)
+      // Twilio errors carry a numeric `code`. 21610 = recipient unsubscribed.
+      const errorCode = (error as { code?: number })?.code ?? null
+
+      if (errorCode === TWILIO_UNSUBSCRIBED_CODE) {
+        // The carrier/Twilio knows this number opted out but our registry didn't.
+        // Backfill the registry so we suppress it locally from now on.
+        console.error(`[SMS] 21610 unsubscribed recipient ${formattedPhone} — recording opt-out`)
+        await recordUnsubscribe(formattedPhone, 'twilio_21610', {
+          reason: 'Captured from Twilio 21610 send error',
+        })
+      } else {
+        console.error(`[SMS] Failed to send to ${formattedPhone} (code=${errorCode}):`, errorMessage)
+      }
+
+      await logSMS({
+        phone: formattedPhone,
+        messageType,
+        body: options.body,
+        status: 'failed',
+        errorCode,
+        errorMessage,
+      })
       results.push({ success: false, phone: formattedPhone, error: errorMessage })
     }
   }
@@ -103,132 +344,17 @@ export async function sendSMS(options: SendSMSOptions): Promise<{ success: boole
   const successCount = results.filter(r => r.success).length
   const failCount = results.filter(r => !r.success).length
 
-  if (failCount === 0) {
-    return { success: true }
-  } else if (successCount === 0) {
-    return { success: false, error: `All ${failCount} SMS failed to send` }
-  } else {
-    return { success: true, error: `${successCount} sent, ${failCount} failed` }
-  }
+  if (failCount === 0) return { success: true }
+  if (successCount === 0) return { success: false, error: `All ${failCount} SMS failed to send` }
+  return { success: true, error: `${successCount} sent, ${failCount} failed` }
 }
 
-/**
- * Get employee phone number by employee ID
- */
-export async function getEmployeePhone(employeeId: string): Promise<string | null> {
-  const supabase = await createServiceClient()
-  const { data, error } = await supabase
-    .from('employees')
-    .select('phone_number')
-    .eq('id', employeeId)
-    .single()
-
-  if (error || !data) {
-    console.error('[SMS] Failed to fetch employee phone:', error)
-    return null
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (data as any).phone_number || null
-}
-
-/**
- * Get all admin/manager phone numbers from notification_recipients table
- * Note: This requires adding a phone_number field to notification_recipients table
- */
-export async function getNotificationRecipientPhones(): Promise<string[]> {
-  const supabase = await createServiceClient()
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (supabase as any)
-    .from('notification_recipients')
-    .select('phone_number')
-    .eq('is_active', true)
-
-  if (error) {
-    console.error('[SMS] Failed to fetch notification recipient phones:', error)
-    return []
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return data?.map((r: any) => r.phone_number).filter(Boolean) || []
-}
-
-/**
- * Get all admin phone numbers from employees table (admins who also have employee records)
- */
-export async function getAdminPhones(): Promise<string[]> {
-  const supabase = await createServiceClient()
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id, role, status')
-    .eq('role', 'admin')
-    .eq('status', 'active')
-
-  if (error || !data) {
-    console.error('[SMS] Failed to fetch admin profiles:', error)
-    return []
-  }
-
-  // Get phone numbers from employees table for these admin profiles
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const adminIds = (data as any[]).map((p: any) => p.id)
-  if (adminIds.length === 0) return []
-
-  const { data: employeeData, error: empError } = await supabase
-    .from('employees')
-    .select('phone_number')
-    .in('id', adminIds)
-
-  if (empError) {
-    console.error('[SMS] Failed to fetch admin employee phones:', empError)
-    return []
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (employeeData as any[])?.map((e: any) => e.phone_number).filter(Boolean) || []
-}
-
-/**
- * Get all notification recipient phone numbers including:
- * - Admin accounts from profiles/employees table
- * - Custom notification recipients from notification_recipients table
- */
-export async function getAllNotificationRecipientPhones(): Promise<string[]> {
-  const [recipientPhones, adminPhones] = await Promise.all([
-    getNotificationRecipientPhones(),
-    getAdminPhones()
-  ])
-
-  // Deduplicate
-  const allPhones = new Set<string>([...recipientPhones, ...adminPhones])
-  return Array.from(allPhones).filter(Boolean)
+function compose(body: string): string {
+  return `${body} ${STOP_TRAILER}`
 }
 
 // ============================================
-// SMS MESSAGE TEMPLATES
-// ============================================
-
-// ============================================
-// WELCOME SMS
-// ============================================
-
-interface WelcomeSMSData {
-  employeeName: string
-  phone: string
-  tempPassword: string
-}
-
-export async function sendWelcomeSMS(data: WelcomeSMSData): Promise<{ success: boolean; error?: string }> {
-  const body = `Welcome to PlayFunia, ${data.employeeName}! Your account is ready. Temp password: ${data.tempPassword}. Please login and change it immediately at admin.playfunia.com/login`
-
-  return sendSMS({
-    to: data.phone,
-    body,
-  })
-}
-
-// ============================================
-// SCHEDULE SMS
+// SCHEDULE SMS — approved use case #1
 // ============================================
 
 interface ScheduleSMSData {
@@ -241,25 +367,10 @@ interface ScheduleSMSData {
 }
 
 export async function sendScheduleAssignedSMS(data: ScheduleSMSData): Promise<{ success: boolean; error?: string }> {
-  // Send to employee
-  const employeeBody = `Hi ${data.employeeName}, you've been assigned a new schedule: ${data.scheduleDate} from ${data.startTime}-${data.endTime}.${data.notes ? ` Notes: ${data.notes}` : ''} Please confirm in the portal.`
-
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Schedule Assigned: ${data.employeeName} on ${data.scheduleDate} (${data.startTime}-${data.endTime})`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
+  const body = compose(
+    `Playfunia Staff Schedule: Hi ${data.employeeName}, you've been assigned a new shift on ${data.scheduleDate} from ${data.startTime}-${data.endTime}.${data.notes ? ` Notes: ${data.notes}` : ''} Please log in to confirm.`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'schedule_assigned' })
 }
 
 interface ScheduleConfirmedSMSData {
@@ -271,45 +382,10 @@ interface ScheduleConfirmedSMSData {
 }
 
 export async function sendScheduleConfirmedSMS(data: ScheduleConfirmedSMSData): Promise<{ success: boolean; error?: string }> {
-  // Send to employee
-  const employeeBody = `Hi ${data.employeeName}, your schedule for ${data.scheduleDate} (${data.startTime}-${data.endTime}) has been confirmed. See you then!`
-
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Schedule Confirmed: ${data.employeeName} confirmed ${data.scheduleDate} (${data.startTime}-${data.endTime})`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
-}
-
-interface CancellationRequestSMSData {
-  employeeName: string
-  scheduleDate: string
-  startTime: string
-  endTime: string
-  reason: string
-}
-
-export async function sendCancellationRequestSMS(data: CancellationRequestSMSData): Promise<{ success: boolean; error?: string }> {
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length === 0) return { success: true }
-
-  const body = `Cancellation Request: ${data.employeeName} requests to cancel ${data.scheduleDate} (${data.startTime}-${data.endTime}). Reason: ${data.reason}`
-
-  return sendSMS({
-    to: adminPhones,
-    body,
-  })
+  const body = compose(
+    `Playfunia Staff Schedule: Hi ${data.employeeName}, your shift on ${data.scheduleDate} (${data.startTime}-${data.endTime}) is confirmed. See you then!`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'schedule_confirmed' })
 }
 
 interface CancellationApprovedSMSData {
@@ -321,25 +397,10 @@ interface CancellationApprovedSMSData {
 }
 
 export async function sendCancellationApprovedSMS(data: CancellationApprovedSMSData): Promise<{ success: boolean; error?: string }> {
-  // Send to employee
-  const employeeBody = `Hi ${data.employeeName}, your cancellation request for ${data.scheduleDate} (${data.startTime}-${data.endTime}) has been approved. You are no longer scheduled.`
-
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Schedule Cancelled: ${data.employeeName}'s cancellation approved for ${data.scheduleDate}`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
+  const body = compose(
+    `Playfunia Staff Schedule: Hi ${data.employeeName}, your cancellation request for ${data.scheduleDate} (${data.startTime}-${data.endTime}) was approved. You are no longer scheduled.`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'cancellation_approved' })
 }
 
 interface AdminCancelledSMSData {
@@ -352,25 +413,10 @@ interface AdminCancelledSMSData {
 }
 
 export async function sendAdminCancelledSMS(data: AdminCancelledSMSData): Promise<{ success: boolean; error?: string }> {
-  // Send to employee
-  const employeeBody = `Hi ${data.employeeName}, your schedule for ${data.scheduleDate} (${data.startTime}-${data.endTime}) has been cancelled by management.${data.reason ? ` Reason: ${data.reason}` : ''}`
-
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Schedule Cancelled by Admin: ${data.employeeName} on ${data.scheduleDate}`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
+  const body = compose(
+    `Playfunia Staff Schedule: Hi ${data.employeeName}, your shift on ${data.scheduleDate} (${data.startTime}-${data.endTime}) was cancelled by management.${data.reason ? ` Reason: ${data.reason}` : ''}`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'admin_cancelled' })
 }
 
 interface ScheduleDeletedSMSData {
@@ -383,29 +429,14 @@ interface ScheduleDeletedSMSData {
 }
 
 export async function sendScheduleDeletedSMS(data: ScheduleDeletedSMSData): Promise<{ success: boolean; error?: string }> {
-  // Send to employee
-  const employeeBody = `Hi ${data.employeeName}, your schedule for ${data.scheduleDate} (${data.startTime}-${data.endTime}) has been deleted.${data.reason ? ` Reason: ${data.reason}` : ''} Contact your manager if you have questions.`
-
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Schedule Deleted: ${data.employeeName}'s schedule for ${data.scheduleDate} removed`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
+  const body = compose(
+    `Playfunia Staff Schedule: Hi ${data.employeeName}, your shift on ${data.scheduleDate} (${data.startTime}-${data.endTime}) was removed.${data.reason ? ` Reason: ${data.reason}` : ''} Contact your manager with questions.`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'schedule_deleted' })
 }
 
 // ============================================
-// TASK SMS
+// TASK SMS — approved use case #2
 // ============================================
 
 interface TaskAssignedSMSData {
@@ -413,53 +444,34 @@ interface TaskAssignedSMSData {
   employeePhone: string
   taskTitle: string
   scheduledDate: string
+  cutoffTime?: string
   location?: string
+  taskDescription?: string
+  taskUrl: string
+}
+
+const TASK_DESCRIPTION_MAX_LEN = 80
+
+function truncate(text: string, maxLen: number): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim()
+  if (collapsed.length <= maxLen) return collapsed
+  return collapsed.slice(0, maxLen - 1).trimEnd() + '…'
 }
 
 export async function sendTaskAssignedSMS(data: TaskAssignedSMSData): Promise<{ success: boolean; error?: string }> {
-  // Send to employee
-  const employeeBody = `Hi ${data.employeeName}, new task assigned: "${data.taskTitle}" on ${data.scheduledDate}${data.location ? ` at ${data.location}` : ''}. Check the portal for details.`
+  const dueClause = data.cutoffTime
+    ? `due ${data.scheduledDate} by ${data.cutoffTime}`
+    : `for ${data.scheduledDate}`
+  const locationClause = data.location ? ` at ${data.location}` : ''
+  const descriptionClause = data.taskDescription
+    ? ` ${truncate(data.taskDescription, TASK_DESCRIPTION_MAX_LEN)}.`
+    : ''
 
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Task Assigned: "${data.taskTitle}" to ${data.employeeName} for ${data.scheduledDate}`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
+  const body = compose(
+    `Playfunia Staff Task Alert: Hi ${data.employeeName}, new task "${data.taskTitle}" assigned, ${dueClause}${locationClause}.${descriptionClause} View: ${data.taskUrl}`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'task_assigned' })
 }
-
-interface TaskCompletedSMSData {
-  employeeName: string
-  taskTitle: string
-  scheduledDate: string
-  completedAt: string
-}
-
-export async function sendTaskCompletedSMS(data: TaskCompletedSMSData): Promise<{ success: boolean; error?: string }> {
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length === 0) return { success: true }
-
-  const body = `Task Completed: ${data.employeeName} completed "${data.taskTitle}" at ${data.completedAt}`
-
-  return sendSMS({
-    to: adminPhones,
-    body,
-  })
-}
-
-// ============================================
-// TASK DEADLINE REMINDER SMS
-// ============================================
 
 interface TaskDeadlineReminderSMSData {
   employeeName: string
@@ -469,213 +481,38 @@ interface TaskDeadlineReminderSMSData {
 }
 
 export async function sendTaskDeadlineReminderSMS(data: TaskDeadlineReminderSMSData): Promise<{ success: boolean; error?: string }> {
-  const body = `Hi ${data.employeeName}, reminder: your task "${data.taskTitle}" is due at ${data.cutoffTime}. Please complete it before the deadline.`
-
-  return sendSMS({
-    to: data.employeePhone,
-    body,
-  })
+  const body = compose(
+    `Playfunia Staff Task Alert: Hi ${data.employeeName}, your task "${data.taskTitle}" is due at ${data.cutoffTime}. Please complete it before the deadline.`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'task_deadline_reminder' })
 }
 
 // ============================================
-// EVENT SMS
+// CLOCK-IN / CLOCK-OUT REMINDERS — approved use case #3
 // ============================================
 
-interface EventAssignedSMSData {
+interface ClockInReminderSMSData {
   employeeName: string
   employeePhone: string
-  eventTitle: string
-  eventDate: string
-  eventTime: string
-  room?: string
-  role: string
+  startTime: string
 }
 
-export async function sendEventAssignedSMS(data: EventAssignedSMSData): Promise<{ success: boolean; error?: string }> {
-  // Send to employee
-  const employeeBody = `Hi ${data.employeeName}, you're assigned to event "${data.eventTitle}" on ${data.eventDate} at ${data.eventTime}${data.room ? ` in ${data.room}` : ''}. Role: ${data.role}`
-
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Event Assignment: ${data.employeeName} assigned to "${data.eventTitle}" (${data.eventDate})`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
+export async function sendClockInReminderSMS(data: ClockInReminderSMSData): Promise<{ success: boolean; error?: string }> {
+  const body = compose(
+    `Playfunia Staff Reminder: Hi ${data.employeeName}, your shift started at ${data.startTime} but you haven't clocked in. Please clock in as soon as possible.`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'clock_in_reminder' })
 }
 
-interface EventRemovedSMSData {
+interface ClockOutReminderSMSData {
   employeeName: string
   employeePhone: string
-  eventTitle: string
-  eventDate: string
+  endTime: string
 }
 
-export async function sendEventRemovedSMS(data: EventRemovedSMSData): Promise<{ success: boolean; error?: string }> {
-  // Send to employee
-  const employeeBody = `Hi ${data.employeeName}, you've been removed from event "${data.eventTitle}" on ${data.eventDate}. Contact your manager if you have questions.`
-
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Event Removal: ${data.employeeName} removed from "${data.eventTitle}" (${data.eventDate})`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
-}
-
-// ============================================
-// EMPLOYEE MANAGEMENT SMS
-// ============================================
-
-interface EmployeeDeactivatedSMSData {
-  employeeName: string
-}
-
-export async function sendEmployeeDeactivatedSMS(data: EmployeeDeactivatedSMSData): Promise<{ success: boolean; error?: string }> {
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length === 0) return { success: true }
-
-  const body = `Employee Deactivated: ${data.employeeName}'s account has been deactivated.`
-
-  return sendSMS({
-    to: adminPhones,
-    body,
-  })
-}
-
-interface EmployeeDeletedSMSData {
-  employeeName: string
-  email: string
-  phone?: string
-}
-
-export async function sendEmployeeDeletedSMS(data: EmployeeDeletedSMSData): Promise<{ success: boolean; error?: string }> {
-  // Try to send to employee if they have a phone
-  if (data.phone) {
-    await sendSMS({
-      to: data.phone,
-      body: `Hi ${data.employeeName}, your PlayFunia employee account has been removed. Thank you for your time with us.`,
-    }).catch(err => console.warn('[SMS] Could not send deletion SMS to employee:', err))
-  }
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    return sendSMS({
-      to: adminPhones,
-      body: `Employee Deleted: ${data.employeeName} (${data.email}) has been permanently removed from the system.`,
-    })
-  }
-
-  return { success: true }
-}
-
-interface EmployeeCreatedSMSData {
-  employeeName: string
-  email: string
-  position?: string
-}
-
-export async function sendEmployeeCreatedSMS(data: EmployeeCreatedSMSData): Promise<{ success: boolean; error?: string }> {
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length === 0) return { success: true }
-
-  const body = `New Employee: ${data.employeeName} (${data.email})${data.position ? ` - ${data.position}` : ''} has been added to the system.`
-
-  return sendSMS({
-    to: adminPhones,
-    body,
-  })
-}
-
-// ============================================
-// BULK SCHEDULE SMS
-// ============================================
-
-interface BulkSchedulesCreatedSMSData {
-  employeeName: string
-  scheduleCount: number
-  startDate: string
-  endDate: string
-}
-
-export async function sendBulkSchedulesCreatedSMS(data: BulkSchedulesCreatedSMSData): Promise<{ success: boolean; error?: string }> {
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length === 0) return { success: true }
-
-  const body = `Bulk Schedules: ${data.scheduleCount} schedules created for ${data.employeeName} from ${data.startDate} to ${data.endDate}`
-
-  return sendSMS({
-    to: adminPhones,
-    body,
-  })
-}
-
-// ============================================
-// PASSWORD RESET SMS
-// ============================================
-
-interface PasswordResetSMSData {
-  name: string
-  phone: string
-  resetUrl: string
-}
-
-export async function sendPasswordResetSMS(data: PasswordResetSMSData): Promise<{ success: boolean; error?: string }> {
-  const body = `Hi ${data.name}, reset your PlayFunia password here: ${data.resetUrl} (expires in 1 hour). If you didn't request this, ignore this message.`
-
-  return sendSMS({
-    to: data.phone,
-    body,
-  })
-}
-
-// ============================================
-// POLICY SMS
-// ============================================
-
-interface PolicySMSData {
-  employeeName: string
-  employeePhone: string
-  policyTitle: string
-}
-
-export async function sendPolicySMS(data: PolicySMSData): Promise<{ success: boolean; error?: string }> {
-  const employeeBody = `Hi ${data.employeeName}, please review the company policy "${data.policyTitle}" that was sent to your email. Log in to the portal for details.`
-
-  const employeeResult = await sendSMS({
-    to: data.employeePhone,
-    body: employeeBody,
-  })
-
-  // Notify admins
-  const adminPhones = await getAllNotificationRecipientPhones()
-  if (adminPhones.length > 0) {
-    const adminBody = `Policy Sent: "${data.policyTitle}" sent to ${data.employeeName}`
-    await sendSMS({
-      to: adminPhones,
-      body: adminBody,
-    })
-  }
-
-  return employeeResult
+export async function sendClockOutReminderSMS(data: ClockOutReminderSMSData): Promise<{ success: boolean; error?: string }> {
+  const body = compose(
+    `Playfunia Staff Reminder: Hi ${data.employeeName}, your shift ended at ${data.endTime} but you haven't clocked out. Please clock out as soon as possible.`
+  )
+  return sendSMS({ to: data.employeePhone, body, messageType: 'clock_out_reminder' })
 }

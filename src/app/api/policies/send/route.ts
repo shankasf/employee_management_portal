@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
 import { sendPolicyEmail } from '@/lib/email'
-import { sendPolicySMS } from '@/lib/sms'
+import { getEmployeeRecipient } from '@/lib/recipients'
 
 interface PolicyData {
   id: string
@@ -25,19 +25,24 @@ export async function POST(request: Request) {
 
     const { data: authProfile } = await authSupabase
       .from('profiles')
-      .select('role')
+      .select('role, admin_scoped')
       .eq('id', user.id)
       .single()
 
-    if ((authProfile as { role: string } | null)?.role !== 'admin') {
+    const _p = authProfile as { role: string; admin_scoped?: boolean } | null
+    if (_p?.role !== 'admin') {
       return NextResponse.json({ error: 'Forbidden - Admin only' }, { status: 403 })
+    }
+    // Important Messages are company-wide; not available to scoped admins.
+    if (_p?.admin_scoped) {
+      return NextResponse.json({ error: 'Forbidden - company-wide function' }, { status: 403 })
     }
 
     const { policyId, employeeId } = await request.json()
 
     if (!policyId || !employeeId) {
       return NextResponse.json(
-        { error: 'Policy ID and Employee ID are required' },
+        { error: 'Message ID and Employee ID are required' },
         { status: 400 }
       )
     }
@@ -53,41 +58,19 @@ export async function POST(request: Request) {
 
     if (policyError || !policyData) {
       return NextResponse.json(
-        { error: 'Policy not found' },
+        { error: 'Message not found' },
         { status: 404 }
       )
     }
 
     const policy = policyData as PolicyData
 
-    // Fetch employee details
-    const { data: employee, error: employeeError } = await supabase
-      .from('employees')
-      .select(`
-        id,
-        phone_number,
-        profiles!inner (
-          id,
-          full_name,
-          email
-        )
-      `)
-      .eq('id', employeeId)
-      .single()
-
-    if (employeeError || !employee) {
-      return NextResponse.json(
-        { error: 'Employee not found' },
-        { status: 404 }
-      )
+    const recipient = await getEmployeeRecipient(employeeId)
+    if (!recipient) {
+      return NextResponse.json({ success: true, skipped: 'inactive_employee' })
     }
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const employeeData = employee as any
-    const empProfile = employeeData.profiles
-    const employeeName = empProfile?.full_name || 'Employee'
-    const employeeEmail = empProfile?.email
-    const employeePhone = employeeData.phone_number
+    const employeeName = recipient.fullName
+    const employeeEmail = recipient.email
 
     if (!employeeEmail) {
       return NextResponse.json(
@@ -114,18 +97,9 @@ export async function POST(request: Request) {
       )
     }
 
-    // Send SMS if phone available
-    if (employeePhone) {
-      sendPolicySMS({
-        employeeName,
-        employeePhone,
-        policyTitle: policy.title,
-      }).catch(err => console.error('Failed to send policy SMS:', err))
-    }
-
     return NextResponse.json({
       success: true,
-      message: `Policy sent to ${employeeName}`
+      message: `Message sent to ${employeeName}`
     })
   } catch (error) {
     console.error('Error sending policy:', error)

@@ -7,6 +7,7 @@ import { useTasks, useAssignableUsers, useTaskInstances, invalidateQueries } fro
 import { taskNotifications } from '@/lib/notifications'
 import { getTodayNY, getDateNY, formatScheduleDate, formatDateTime, formatTimeString, getSignedStorageUrl } from '@/lib/utils'
 import { RichTextEditor, RichTextDisplay } from '@/components/RichTextEditor'
+import { VideoPlayer } from '@/components/VideoPlayer'
 import { logValidationRejection, startUpload } from '@/lib/upload-logger'
 import { resumableUpload, shouldUseTus } from '@/lib/resumable-upload'
 import { logClientActivity } from '@/lib/client-activity-log'
@@ -25,6 +26,8 @@ interface Task {
     requires_notes: boolean
     reference_images: string[] | null
     reference_videos: string[] | null
+    assigned_employee_ids: string[] | null
+    recurrence_days: string[] | null
     created_at: string
 }
 
@@ -80,6 +83,67 @@ export default function TasksPage() {
     const { user } = useAuth()
     const { data: tasks = [], isLoading: loading, mutate } = useTasks()
     const { data: employees = [] } = useAssignableUsers()
+    const [clockedInIds, setClockedInIds] = useState<Set<string>>(new Set())
+
+    // Businesses & employee-business mapping for filtering
+    const [businesses, setBusinesses] = useState<{ id: number; name: string; location: string | null }[]>([])
+    const [employeeBusinessMap, setEmployeeBusinessMap] = useState<Map<string, number[]>>(new Map())
+
+    useEffect(() => {
+        const supabase = createUntypedClient()
+        // Fetch businesses
+        supabase.from('businesses').select('id, name, location').order('name')
+            .then(({ data }: { data: { id: number; name: string; location: string | null }[] | null }) => {
+                if (data) setBusinesses(data)
+            })
+        // Fetch employee-business assignments
+        supabase.from('employee_businesses').select('employee_id, business_id')
+            .then(({ data }: { data: { employee_id: string; business_id: number }[] | null }) => {
+                if (data) {
+                    const map = new Map<string, number[]>()
+                    for (const row of data) {
+                        const existing = map.get(row.employee_id) || []
+                        existing.push(row.business_id)
+                        map.set(row.employee_id, existing)
+                    }
+                    setEmployeeBusinessMap(map)
+                }
+            })
+    }, [])
+
+    // Fetch currently clocked-in employee IDs (today only, ignore stale records)
+    useEffect(() => {
+        const supabase = createUntypedClient()
+        const todayStart = getTodayNY() + 'T00:00:00'
+        supabase
+            .from('attendance_logs')
+            .select('employee_id')
+            .is('clock_out', null)
+            .gte('clock_in', todayStart)
+            .then(({ data }: { data: { employee_id: string }[] | null }) => {
+                if (data) setClockedInIds(new Set(data.map(d => d.employee_id)))
+            })
+    }, [])
+
+    // Business filter state (shared across modals, reset on modal open)
+    const [selectedBusinessIds, setSelectedBusinessIds] = useState<number[]>([])
+
+    // Filter employees by selected businesses (union)
+    const filteredByBusiness = useMemo(() => {
+        const allEmps = employees as ActiveEmployee[]
+        if (selectedBusinessIds.length === 0) return allEmps
+        const bizSet = new Set(selectedBusinessIds)
+        return allEmps.filter(emp => {
+            const empBizIds = employeeBusinessMap.get(emp.id) || []
+            return empBizIds.some(bid => bizSet.has(bid))
+        })
+    }, [employees, selectedBusinessIds, employeeBusinessMap])
+
+    const clockedInEmployees = useMemo(() =>
+        filteredByBusiness.filter(emp => clockedInIds.has(emp.id)),
+        [filteredByBusiness, clockedInIds]
+    )
+
     const [showModal, setShowModal] = useState(false)
     const [showAssignModal, setShowAssignModal] = useState(false)
     const [showDetailModal, setShowDetailModal] = useState(false)
@@ -131,8 +195,15 @@ export default function TasksPage() {
     const bottomScrollRef = useRef<HTMLDivElement>(null)
     const scrollSourceRef = useRef<'top' | 'bottom' | null>(null)
 
+    // Sorting state for assigned tasks table
+    const [assignedSort, setAssignedSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'scheduled_date', dir: 'desc' })
+
+    // Sorting state for task definitions table
+    const [definitionSort, setDefinitionSort] = useState<{ key: string; dir: 'asc' | 'desc' }>({ key: 'created_at', dir: 'desc' })
+
     // Filters for assigned tasks table
     const [filters, setFilters] = useState({
+        search: '',
         startDate: getDateNY(-30),
         endDate: getDateNY(30),
         status: 'all',
@@ -159,6 +230,7 @@ export default function TasksPage() {
     // Clear all filters
     function clearFilters() {
         setFilters({
+            search: '',
             startDate: getDateNY(-30),
             endDate: getDateNY(30),
             status: 'all',
@@ -281,7 +353,11 @@ export default function TasksPage() {
         // Optional immediate assignment
         assign_now: false,
         employee_ids: [] as string[],
-        scheduled_date: getTodayNY()
+        scheduled_date: getTodayNY(),
+        // Persistent recurring assignment list
+        assigned_employee_ids: [] as string[],
+        // Day-of-week filter for recurring tasks
+        recurrence_days: [] as string[],
     })
 
     // Assignment form state
@@ -289,6 +365,137 @@ export default function TasksPage() {
         employee_ids: [] as string[],
         scheduled_date: getTodayNY()
     })
+
+    // Reusable employee checklist with business filter + clocked-in section
+    function renderEmployeeChecklist(
+        selectedIds: string[],
+        onToggle: (empId: string, checked: boolean) => void,
+        onSelectAll: (ids: string[]) => void,
+        onClear: () => void
+    ) {
+        const visibleEmps = filteredByBusiness
+        return (
+            <>
+                {/* Business Filter */}
+                {businesses.length > 0 && (
+                    <div className="mb-3">
+                        <div className="flex items-baseline gap-2 mb-1">
+                            <label className="label mb-0">Filter by Business</label>
+                            <span className="text-xs text-muted-foreground">Only employees working in selected businesses will show below</span>
+                        </div>
+                        <div className="border rounded-md max-h-32 overflow-y-auto">
+                            {businesses.map(b => (
+                                <label key={b.id} className="flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-muted/30">
+                                    <input
+                                        type="checkbox"
+                                        className="rounded border-gray-300"
+                                        checked={selectedBusinessIds.includes(b.id)}
+                                        onChange={(e) => {
+                                            if (e.target.checked) {
+                                                setSelectedBusinessIds([...selectedBusinessIds, b.id])
+                                            } else {
+                                                setSelectedBusinessIds(selectedBusinessIds.filter(id => id !== b.id))
+                                            }
+                                        }}
+                                    />
+                                    <span className="text-sm">{b.name}{b.location ? ` - ${b.location}` : ''}</span>
+                                </label>
+                            ))}
+                        </div>
+                        {selectedBusinessIds.length > 0 && (
+                            <button
+                                type="button"
+                                className="text-xs text-blue-600 hover:underline mt-1"
+                                onClick={() => setSelectedBusinessIds([])}
+                            >
+                                Clear filter ({selectedBusinessIds.length} selected)
+                            </button>
+                        )}
+                    </div>
+                )}
+
+                {/* Clocked In Employees Section */}
+                {clockedInEmployees.length > 0 && (
+                    <div className="mb-3">
+                        <label className="label flex items-center gap-2">
+                            <span className="inline-block w-2 h-2 rounded-full bg-green-500"></span>
+                            Clocked In ({clockedInEmployees.length})
+                        </label>
+                        <div className="border rounded-md border-green-200">
+                            <label className="flex items-center gap-2 px-3 py-2 border-b border-green-200 bg-green-50 cursor-pointer hover:bg-green-100">
+                                <input
+                                    type="checkbox"
+                                    className="rounded border-gray-300"
+                                    checked={clockedInEmployees.length > 0 && clockedInEmployees.every(emp => selectedIds.includes(emp.id))}
+                                    onChange={(e) => {
+                                        if (e.target.checked) {
+                                            const newIds = Array.from(new Set([...selectedIds, ...clockedInEmployees.map(emp => emp.id)]))
+                                            onSelectAll(newIds)
+                                        } else {
+                                            const clockedSet = new Set(clockedInEmployees.map(emp => emp.id))
+                                            onSelectAll(selectedIds.filter(id => !clockedSet.has(id)))
+                                        }
+                                    }}
+                                />
+                                <span className="text-sm font-medium">Select All Clocked In</span>
+                            </label>
+                            <div className="max-h-36 overflow-y-auto">
+                                {clockedInEmployees.map((emp) => (
+                                    <label key={emp.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-green-50/50">
+                                        <input
+                                            type="checkbox"
+                                            className="rounded border-gray-300"
+                                            checked={selectedIds.includes(emp.id)}
+                                            onChange={(e) => onToggle(emp.id, e.target.checked)}
+                                        />
+                                        <span className="inline-block w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>
+                                        <span className="text-sm">{emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}{emp.is_admin && <span className="ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Admin</span>}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* All Employees Section */}
+                <div>
+                    <label className="label">All Employees ({visibleEmps.length})</label>
+                    <div className="border rounded-md">
+                        <label className="flex items-center gap-2 px-3 py-2 border-b bg-muted/30 cursor-pointer hover:bg-muted/50">
+                            <input
+                                type="checkbox"
+                                className="rounded border-gray-300"
+                                checked={visibleEmps.length > 0 && visibleEmps.every(emp => selectedIds.includes(emp.id))}
+                                onChange={(e) => {
+                                    if (e.target.checked) {
+                                        const newIds = Array.from(new Set([...selectedIds, ...visibleEmps.map(emp => emp.id)]))
+                                        onSelectAll(newIds)
+                                    } else {
+                                        onClear()
+                                    }
+                                }}
+                            />
+                            <span className="text-sm font-medium">Select All</span>
+                        </label>
+                        <div className="max-h-48 overflow-y-auto">
+                            {visibleEmps.map((emp) => (
+                                <label key={emp.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/30">
+                                    <input
+                                        type="checkbox"
+                                        className="rounded border-gray-300"
+                                        checked={selectedIds.includes(emp.id)}
+                                        onChange={(e) => onToggle(emp.id, e.target.checked)}
+                                    />
+                                    {clockedInIds.has(emp.id) && <span className="inline-block w-2 h-2 rounded-full bg-green-500 flex-shrink-0"></span>}
+                                    <span className="text-sm">{emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}{emp.is_admin && <span className="ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Admin</span>}</span>
+                                </label>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </>
+        )
+    }
 
     async function openModal(task?: Task) {
         // Reset reference images state
@@ -321,7 +528,9 @@ export default function TasksPage() {
                 requires_notes: task.requires_notes,
                 assign_now: false,
                 employee_ids: [] as string[],
-                scheduled_date: getTodayNY()
+                scheduled_date: getTodayNY(),
+                assigned_employee_ids: task.is_recurring ? (task.assigned_employee_ids || []) : [],
+                recurrence_days: task.is_recurring ? (task.recurrence_days || []) : [],
             })
             // Load existing reference images
             if (task.reference_images && task.reference_images.length > 0) {
@@ -358,9 +567,12 @@ export default function TasksPage() {
                 requires_notes: false,
                 assign_now: false,
                 employee_ids: [] as string[],
-                scheduled_date: getTodayNY()
+                scheduled_date: getTodayNY(),
+                assigned_employee_ids: [],
+                recurrence_days: [],
             })
         }
+        setSelectedBusinessIds([])
         setShowModal(true)
     }
 
@@ -615,6 +827,7 @@ export default function TasksPage() {
             employee_ids: [],
             scheduled_date: getTodayNY()
         })
+        setSelectedBusinessIds([])
         setShowAssignModal(true)
     }
 
@@ -797,6 +1010,8 @@ export default function TasksPage() {
                         requires_photo: formData.requires_photo,
                         requires_video: formData.requires_video,
                         requires_notes: formData.requires_notes,
+                        assigned_employee_ids: formData.is_recurring && formData.assigned_employee_ids.length > 0 ? formData.assigned_employee_ids : null,
+                        recurrence_days: formData.is_recurring && formData.recurrence_days.length > 0 ? formData.recurrence_days : null,
                         created_by: user?.id
                     })
                     .select('id')
@@ -833,6 +1048,8 @@ export default function TasksPage() {
                 requires_notes: formData.requires_notes,
                 reference_images: allRefImages.length > 0 ? allRefImages : null,
                 reference_videos: allRefVideos.length > 0 ? allRefVideos : null,
+                assigned_employee_ids: formData.is_recurring && formData.assigned_employee_ids.length > 0 ? formData.assigned_employee_ids : null,
+                recurrence_days: formData.is_recurring && formData.recurrence_days.length > 0 ? formData.recurrence_days : null,
                 created_by: user?.id
             }
 
@@ -854,7 +1071,7 @@ export default function TasksPage() {
                 if (error) throw error
             }
 
-            // If assign_now is checked, create task instances for all selected employees
+            // If assign_now is checked, create task instances for each selected employee
             let assignDetails: Record<string, unknown> | null = null
             if (formData.assign_now && taskId && formData.employee_ids.length > 0) {
                 const scheduledDate = formData.scheduled_date || getTodayNY()
@@ -913,6 +1130,15 @@ export default function TasksPage() {
                 mutateInstances()
             } else {
                 alert(editingTask ? 'Task updated!' : 'Task created!')
+            }
+
+            // If this is a recurring task with assigned employees, trigger instance creation for today (non-blocking)
+            if (formData.is_recurring && formData.assigned_employee_ids.length > 0) {
+                fetch('/api/admin/trigger-recurring-tasks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ employee_ids: formData.assigned_employee_ids, dates: [getTodayNY()] }),
+                }).catch(err => console.error('Failed to trigger recurring tasks:', err))
             }
 
             logClientActivity({
@@ -986,6 +1212,17 @@ export default function TasksPage() {
                 .select()
 
             if (error) throw error
+
+            // Also persist to tasks.assigned_employee_ids (merge, not replace)
+            if (assigningTask.is_recurring) {
+                const existingIds = assigningTask.assigned_employee_ids || []
+                const mergedIds = Array.from(new Set([...existingIds, ...assignData.employee_ids]))
+                await supabase
+                    .from('tasks')
+                    .update({ assigned_employee_ids: mergedIds })
+                    .eq('id', assigningTask.id)
+                mutate() // refresh task list
+            }
 
             // Send email notification to each assigned employee (non-blocking)
             if (data && data.length > 0) {
@@ -1193,6 +1430,7 @@ export default function TasksPage() {
             employee_ids: [],
             scheduled_date: getTodayNY()
         })
+        setSelectedBusinessIds([])
         setShowBulkAssignModal(true)
     }
 
@@ -1302,9 +1540,19 @@ export default function TasksPage() {
         return { pending, completed, overdue, total: taskInstances.length }
     }, [taskInstances])
 
-    // Apply client-side filters for status, taskId, location, and hasSubmission
+    // Apply client-side filters for search, status, taskId, location, and hasSubmission
     const filteredTaskInstances = useMemo(() => {
+        const searchLower = filters.search.toLowerCase().trim()
         return taskInstances.filter((instance: TaskInstance) => {
+            // Filter by search (employee name or task title)
+            if (searchLower) {
+                const employeeName = (instance.employees?.display_name || instance.employees?.profiles?.full_name || '').toLowerCase()
+                const taskTitle = (instance.tasks?.title || '').toLowerCase()
+                const taskLocation = (instance.tasks?.location || '').toLowerCase()
+                if (!employeeName.includes(searchLower) && !taskTitle.includes(searchLower) && !taskLocation.includes(searchLower)) {
+                    return false
+                }
+            }
             // Filter by status (applied client-side to keep stats accurate)
             if (filters.status !== 'all' && instance.status !== filters.status) {
                 return false
@@ -1342,7 +1590,88 @@ export default function TasksPage() {
             }
             return true
         })
-    }, [taskInstances, filters.status, filters.taskId, filters.location, filters.hasSubmission])
+    }, [taskInstances, filters.search, filters.status, filters.taskId, filters.location, filters.hasSubmission])
+
+    // Sorted assigned task instances
+    const sortedTaskInstances = useMemo(() => {
+        const sorted = [...filteredTaskInstances]
+        const { key, dir } = assignedSort
+        sorted.sort((a: TaskInstance, b: TaskInstance) => {
+            let cmp = 0
+            switch (key) {
+                case 'task':
+                    cmp = (a.tasks?.title || '').localeCompare(b.tasks?.title || '')
+                    break
+                case 'employee':
+                    cmp = (a.employees?.display_name || a.employees?.profiles?.full_name || '').localeCompare(b.employees?.display_name || b.employees?.profiles?.full_name || '')
+                    break
+                case 'recurring':
+                    cmp = (a.tasks?.is_recurring ? 1 : 0) - (b.tasks?.is_recurring ? 1 : 0)
+                    break
+                case 'created_at':
+                    cmp = (a.created_at || '').localeCompare(b.created_at || '')
+                    break
+                case 'status':
+                    cmp = (a.status || '').localeCompare(b.status || '')
+                    break
+                case 'location':
+                    cmp = (a.tasks?.location || '').localeCompare(b.tasks?.location || '')
+                    break
+                case 'scheduled_date':
+                    cmp = (a.scheduled_date || '').localeCompare(b.scheduled_date || '')
+                    break
+                case 'completed_at':
+                    cmp = (a.completed_at || '').localeCompare(b.completed_at || '')
+                    break
+            }
+            return dir === 'asc' ? cmp : -cmp
+        })
+        return sorted
+    }, [filteredTaskInstances, assignedSort])
+
+    // Sorted task definitions
+    const sortedDefinitions = useMemo(() => {
+        const sorted = [...filteredTasks]
+        const { key, dir } = definitionSort
+        sorted.sort((a: Task, b: Task) => {
+            let cmp = 0
+            switch (key) {
+                case 'title':
+                    cmp = a.title.localeCompare(b.title)
+                    break
+                case 'role':
+                    cmp = (a.role_target || '').localeCompare(b.role_target || '')
+                    break
+                case 'location':
+                    cmp = (a.location || '').localeCompare(b.location || '')
+                    break
+                case 'cutoff_time':
+                    cmp = (a.cutoff_time || '').localeCompare(b.cutoff_time || '')
+                    break
+                case 'created_at':
+                    cmp = (a.created_at || '').localeCompare(b.created_at || '')
+                    break
+            }
+            return dir === 'asc' ? cmp : -cmp
+        })
+        return sorted
+    }, [filteredTasks, definitionSort])
+
+    // Toggle sort for assigned tasks
+    function toggleAssignedSort(key: string) {
+        setAssignedSort(prev => prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' })
+    }
+
+    // Toggle sort for definitions
+    function toggleDefinitionSort(key: string) {
+        setDefinitionSort(prev => prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' })
+    }
+
+    // Sort indicator arrow
+    function sortArrow(currentSort: { key: string; dir: 'asc' | 'desc' }, key: string) {
+        if (currentSort.key !== key) return <span className="text-muted-foreground/40 ml-1">{'\u2195'}</span>
+        return <span className="ml-1">{currentSort.dir === 'asc' ? '\u25B2' : '\u25BC'}</span>
+    }
 
     // Sync dual scrollbars (top + bottom) for assigned tasks table
     useEffect(() => {
@@ -1398,7 +1727,7 @@ export default function TasksPage() {
             <div className="card p-4">
                 <div className="flex items-center justify-between mb-3">
                     <h3 className="text-sm font-medium text-muted-foreground">Filters</h3>
-                    {(filters.status !== 'all' || filters.employeeId !== 'all' || filters.taskId !== 'all' || filters.location !== 'all' || filters.hasSubmission !== 'all') && (
+                    {(filters.search || filters.status !== 'all' || filters.employeeId !== 'all' || filters.taskId !== 'all' || filters.location !== 'all' || filters.hasSubmission !== 'all') && (
                         <button
                             className="text-xs text-primary hover:underline"
                             onClick={clearFilters}
@@ -1540,6 +1869,28 @@ export default function TasksPage() {
             {/* Assigned Tasks Tab */}
             {activeTab === 'assigned' && (
                 <div className="space-y-4">
+                    {/* Search Bar */}
+                    <div className="relative">
+                        <input
+                            type="text"
+                            placeholder="Search by employee name, task title, or location..."
+                            className="input w-full pl-10"
+                            value={filters.search}
+                            onChange={(e) => setFilters({ ...filters, search: e.target.value })}
+                        />
+                        <svg className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+                        </svg>
+                        {filters.search && (
+                            <button
+                                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                onClick={() => setFilters({ ...filters, search: '' })}
+                            >
+                                &times;
+                            </button>
+                        )}
+                    </div>
+
                     {/* Stats Cards - Clickable to filter */}
                     <div className="overflow-x-auto pb-2 -mx-4 px-4 sm:mx-0 sm:px-0 sm:overflow-visible">
                         <div className="flex gap-3 min-w-max sm:grid sm:grid-cols-4 sm:gap-4 sm:min-w-0">
@@ -1659,20 +2010,20 @@ export default function TasksPage() {
                                                     title="Select all"
                                                 />
                                             </th>
-                                            <th className="text-left p-3 font-medium whitespace-nowrap">Task</th>
-                                            <th className="text-left p-3 font-medium whitespace-nowrap">Employee</th>
-                                            <th className="text-center p-3 font-medium whitespace-nowrap">Recurring</th>
-                                            <th className="text-left p-3 font-medium whitespace-nowrap">Created At</th>
-                                            <th className="text-left p-3 font-medium whitespace-nowrap">Status</th>
-                                            <th className="text-left p-3 font-medium whitespace-nowrap">Location</th>
+                                            <th className="text-left p-3 font-medium whitespace-nowrap cursor-pointer select-none hover:text-primary" onClick={() => toggleAssignedSort('task')}>Task{sortArrow(assignedSort, 'task')}</th>
+                                            <th className="text-left p-3 font-medium whitespace-nowrap cursor-pointer select-none hover:text-primary" onClick={() => toggleAssignedSort('employee')}>Employee{sortArrow(assignedSort, 'employee')}</th>
+                                            <th className="text-center p-3 font-medium whitespace-nowrap cursor-pointer select-none hover:text-primary" onClick={() => toggleAssignedSort('recurring')}>Recurring{sortArrow(assignedSort, 'recurring')}</th>
+                                            <th className="text-left p-3 font-medium whitespace-nowrap cursor-pointer select-none hover:text-primary" onClick={() => toggleAssignedSort('created_at')}>Created At{sortArrow(assignedSort, 'created_at')}</th>
+                                            <th className="text-left p-3 font-medium whitespace-nowrap cursor-pointer select-none hover:text-primary" onClick={() => toggleAssignedSort('status')}>Status{sortArrow(assignedSort, 'status')}</th>
+                                            <th className="text-left p-3 font-medium whitespace-nowrap cursor-pointer select-none hover:text-primary" onClick={() => toggleAssignedSort('location')}>Location{sortArrow(assignedSort, 'location')}</th>
                                             <th className="text-left p-3 font-medium whitespace-nowrap">Requirements</th>
-                                            <th className="text-left p-3 font-medium whitespace-nowrap">Scheduled Date</th>
-                                            <th className="text-left p-3 font-medium whitespace-nowrap">Completed At</th>
+                                            <th className="text-left p-3 font-medium whitespace-nowrap cursor-pointer select-none hover:text-primary" onClick={() => toggleAssignedSort('scheduled_date')}>Scheduled Date{sortArrow(assignedSort, 'scheduled_date')}</th>
+                                            <th className="text-left p-3 font-medium whitespace-nowrap cursor-pointer select-none hover:text-primary" onClick={() => toggleAssignedSort('completed_at')}>Completed At{sortArrow(assignedSort, 'completed_at')}</th>
                                             <th className="text-left p-3 font-medium whitespace-nowrap">Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y">
-                                        {filteredTaskInstances.map((instance: TaskInstance) => (
+                                        {sortedTaskInstances.map((instance: TaskInstance) => (
                                             <tr
                                                 key={instance.id}
                                                 className={`hover:bg-muted/30 cursor-pointer transition-colors ${selectedInstanceIds.has(instance.id) ? 'bg-primary/5' : ''}`}
@@ -1975,17 +2326,17 @@ export default function TasksPage() {
                                                         title="Select all"
                                                     />
                                                 </th>
-                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground">Task Title</th>
-                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden sm:table-cell">Role</th>
-                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden md:table-cell">Location</th>
-                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden lg:table-cell">Deadline</th>
+                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground cursor-pointer select-none hover:text-primary" onClick={() => toggleDefinitionSort('title')}>Task Title{sortArrow(definitionSort, 'title')}</th>
+                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden sm:table-cell cursor-pointer select-none hover:text-primary" onClick={() => toggleDefinitionSort('role')}>Role{sortArrow(definitionSort, 'role')}</th>
+                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden md:table-cell cursor-pointer select-none hover:text-primary" onClick={() => toggleDefinitionSort('location')}>Location{sortArrow(definitionSort, 'location')}</th>
+                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden lg:table-cell cursor-pointer select-none hover:text-primary" onClick={() => toggleDefinitionSort('cutoff_time')}>Deadline{sortArrow(definitionSort, 'cutoff_time')}</th>
                                                 <th className="text-center p-3 text-xs font-medium text-muted-foreground">Requirements</th>
-                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden lg:table-cell">Created</th>
+                                                <th className="text-left p-3 text-xs font-medium text-muted-foreground hidden lg:table-cell cursor-pointer select-none hover:text-primary" onClick={() => toggleDefinitionSort('created_at')}>Created{sortArrow(definitionSort, 'created_at')}</th>
                                                 <th className="text-right p-3 text-xs font-medium text-muted-foreground">Actions</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y">
-                                            {filteredTasks.map((task: Task) => (
+                                            {sortedDefinitions.map((task: Task) => (
                                                 <tr
                                                     key={task.id}
                                                     className={`hover:bg-muted/30 cursor-pointer transition-colors ${selectedTaskIds.has(task.id) ? 'bg-primary/5' : ''}`}
@@ -2003,7 +2354,7 @@ export default function TasksPage() {
                                                         <div className="flex items-center gap-2">
                                                             <span className="font-medium text-sm">{task.title}</span>
                                                             {task.is_recurring && (
-                                                                <span className="badge-default text-xs">🔄 {task.frequency}</span>
+                                                                <span className="badge-default text-xs">🔄 {task.frequency}{task.recurrence_days && task.recurrence_days.length > 0 ? ` (${task.recurrence_days.map(d => d.slice(0,3).replace(/^./, c => c.toUpperCase())).join(', ')})` : ''}</span>
                                                             )}
                                                         </div>
                                                         {task.description && (
@@ -2099,55 +2450,32 @@ export default function TasksPage() {
 
             {/* Bulk Assign Modal */}
             {showBulkAssignModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-md">
-                        <div className="p-6">
-                            <h2 className="text-xl font-bold mb-2">Assign Tasks</h2>
-                            <p className="text-muted-foreground mb-4">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-xl shadow-xl w-full max-w-4xl">
+                        <div className="p-6 sm:p-8">
+                            <h2 className="text-2xl font-bold mb-1">Assign Tasks</h2>
+                            <p className="text-muted-foreground text-sm mb-6">
                                 Assign {selectedTaskIds.size} task{selectedTaskIds.size > 1 ? 's' : ''} to employee(s)
                             </p>
                             <form onSubmit={handleBulkAssign} className="space-y-4">
                                 <div>
-                                    <label className="label">Employees * ({bulkAssignData.employee_ids.length} selected)</label>
-                                    <div className="border rounded-md">
-                                        <label className="flex items-center gap-2 px-3 py-2 border-b bg-muted/30 cursor-pointer hover:bg-muted/50">
-                                            <input
-                                                type="checkbox"
-                                                className="rounded border-gray-300"
-                                                checked={employees.length > 0 && bulkAssignData.employee_ids.length === employees.length}
-                                                onChange={(e) => {
-                                                    if (e.target.checked) {
-                                                        setBulkAssignData({ ...bulkAssignData, employee_ids: employees.map((emp: ActiveEmployee) => emp.id) })
-                                                    } else {
-                                                        setBulkAssignData({ ...bulkAssignData, employee_ids: [] })
-                                                    }
-                                                }}
-                                            />
-                                            <span className="text-sm font-medium">Select All</span>
-                                        </label>
-                                        <div className="max-h-48 overflow-y-auto">
-                                            {employees.map((emp: ActiveEmployee) => (
-                                                <label key={emp.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/30">
-                                                    <input
-                                                        type="checkbox"
-                                                        className="rounded border-gray-300"
-                                                        checked={bulkAssignData.employee_ids.includes(emp.id)}
-                                                        onChange={(e) => {
-                                                            if (e.target.checked) {
-                                                                setBulkAssignData({ ...bulkAssignData, employee_ids: [...bulkAssignData.employee_ids, emp.id] })
-                                                            } else {
-                                                                setBulkAssignData({ ...bulkAssignData, employee_ids: bulkAssignData.employee_ids.filter(id => id !== emp.id) })
-                                                            }
-                                                        }}
-                                                    />
-                                                    <span className="text-sm">{emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}{emp.is_admin && <span className="ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Admin</span>}</span>
-                                                </label>
-                                            ))}
-                                        </div>
-                                    </div>
+                                    <label className="label text-base font-semibold">Employees * ({bulkAssignData.employee_ids.length} selected)</label>
+                                    {renderEmployeeChecklist(
+                                        bulkAssignData.employee_ids,
+                                        (empId, checked) => {
+                                            if (checked) {
+                                                setBulkAssignData({ ...bulkAssignData, employee_ids: [...bulkAssignData.employee_ids, empId] })
+                                            } else {
+                                                setBulkAssignData({ ...bulkAssignData, employee_ids: bulkAssignData.employee_ids.filter(id => id !== empId) })
+                                            }
+                                        },
+                                        (ids) => setBulkAssignData({ ...bulkAssignData, employee_ids: ids }),
+                                        () => setBulkAssignData({ ...bulkAssignData, employee_ids: [] })
+                                    )}
                                 </div>
                                 <div>
-                                    <label className="label">Scheduled Date *</label>
+                                    <label className="label text-base font-semibold">Scheduled Date *</label>
                                     <input
                                         type="date"
                                         required
@@ -2156,8 +2484,8 @@ export default function TasksPage() {
                                         onChange={(e) => setBulkAssignData({ ...bulkAssignData, scheduled_date: e.target.value })}
                                     />
                                 </div>
-                                <div className="bg-muted/50 rounded-lg p-3">
-                                    <p className="text-sm font-medium mb-2">Selected Tasks:</p>
+                                <div className="bg-muted/50 rounded-lg p-4">
+                                    <p className="text-sm font-semibold mb-2">Selected Tasks:</p>
                                     <ul className="text-sm text-muted-foreground space-y-1 max-h-32 overflow-y-auto">
                                         {Array.from(selectedTaskIds).map(id => {
                                             const task = tasks.find((t: Task) => t.id === id)
@@ -2186,13 +2514,15 @@ export default function TasksPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Create/Edit Task Modal */}
             {showModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50 p-0 sm:p-4">
-                    <div className="bg-card rounded-t-xl sm:rounded-lg shadow-lg w-full sm:max-w-lg max-h-[90vh] sm:max-h-[85vh] overflow-y-auto animate-slide-up sm:animate-none">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-end sm:items-center justify-center p-0 sm:p-4">
+                    <div className="bg-card rounded-t-xl sm:rounded-lg shadow-lg w-full sm:max-w-lg animate-slide-up sm:animate-none">
                         <div className="p-4 sm:p-6">
                             <h2 className="text-lg sm:text-xl font-bold mb-4">
                                 {editingTask ? 'Edit Task' : 'Create New Task'}
@@ -2305,6 +2635,50 @@ export default function TasksPage() {
                                             <option value="weekly">Weekly</option>
                                             <option value="monthly">Monthly</option>
                                         </select>
+                                        <div className="mt-3">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <label className="text-sm text-muted-foreground">Recur only on these days (optional)</label>
+                                                <button
+                                                    type="button"
+                                                    className="text-xs text-primary hover:underline"
+                                                    onClick={() => setFormData({
+                                                        ...formData,
+                                                        recurrence_days: formData.recurrence_days.length === 7 ? [] : ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
+                                                    })}
+                                                >
+                                                    {formData.recurrence_days.length === 7 ? 'Clear All' : 'Select All'}
+                                                </button>
+                                            </div>
+                                            <div className="flex flex-wrap gap-2">
+                                                {[
+                                                    { value: 'monday', label: 'Mon' },
+                                                    { value: 'tuesday', label: 'Tue' },
+                                                    { value: 'wednesday', label: 'Wed' },
+                                                    { value: 'thursday', label: 'Thu' },
+                                                    { value: 'friday', label: 'Fri' },
+                                                    { value: 'saturday', label: 'Sat' },
+                                                    { value: 'sunday', label: 'Sun' },
+                                                ].map(day => (
+                                                    <label key={day.value} className="flex items-center gap-1.5">
+                                                        <input
+                                                            type="checkbox"
+                                                            className="rounded border-gray-300"
+                                                            checked={formData.recurrence_days.includes(day.value)}
+                                                            onChange={(e) => {
+                                                                const days = e.target.checked
+                                                                    ? [...formData.recurrence_days, day.value]
+                                                                    : formData.recurrence_days.filter(d => d !== day.value)
+                                                                setFormData({ ...formData, recurrence_days: days })
+                                                            }}
+                                                        />
+                                                        <span className="text-sm">{day.label}</span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                            {formData.recurrence_days.length === 0 && (
+                                                <p className="text-xs text-muted-foreground mt-1">No days selected = recurs on all eligible days</p>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
                                 <div className="space-y-2">
@@ -2513,7 +2887,33 @@ export default function TasksPage() {
                                     </button>
                                 </div>
 
-                                {/* Assignment Section */}
+                                {/* Recurring Task — Assigned Employees */}
+                                {formData.is_recurring && (
+                                    <div className="border-t pt-4 mt-4">
+                                        <label className="label text-base font-semibold">
+                                            Assigned Employees ({formData.assigned_employee_ids.length} selected)
+                                        </label>
+                                        <p className="text-xs text-muted-foreground mb-2">
+                                            These employees will automatically receive this task on days they are scheduled to work.
+                                        </p>
+                                        <div className="bg-muted/30 p-4 rounded-lg">
+                                            {renderEmployeeChecklist(
+                                                formData.assigned_employee_ids,
+                                                (empId, checked) => {
+                                                    if (checked) {
+                                                        setFormData({ ...formData, assigned_employee_ids: [...formData.assigned_employee_ids, empId] })
+                                                    } else {
+                                                        setFormData({ ...formData, assigned_employee_ids: formData.assigned_employee_ids.filter(id => id !== empId) })
+                                                    }
+                                                },
+                                                (ids) => setFormData({ ...formData, assigned_employee_ids: ids }),
+                                                () => setFormData({ ...formData, assigned_employee_ids: [] })
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Assignment Section — Immediate */}
                                 <div className="border-t pt-4 mt-4">
                                     <div className="flex items-center gap-2 mb-3">
                                         <input
@@ -2524,50 +2924,24 @@ export default function TasksPage() {
                                             className="rounded border-gray-300"
                                         />
                                         <label htmlFor="assign_now" className="text-sm font-medium">
-                                            Assign to employee now
+                                            Also assign to employees now (create today&apos;s instance)
                                         </label>
                                     </div>
                                     {formData.assign_now && (
                                         <div className="bg-muted/30 p-4 rounded-lg">
-                                            <div>
-                                                <label className="label">Employees * ({formData.employee_ids.length} selected)</label>
-                                                <div className="border rounded-md">
-                                                    <label className="flex items-center gap-2 px-3 py-2 border-b bg-muted/30 cursor-pointer hover:bg-muted/50">
-                                                        <input
-                                                            type="checkbox"
-                                                            className="rounded border-gray-300"
-                                                            checked={employees.length > 0 && formData.employee_ids.length === employees.length}
-                                                            onChange={(e) => {
-                                                                if (e.target.checked) {
-                                                                    setFormData({ ...formData, employee_ids: employees.map((emp: ActiveEmployee) => emp.id) })
-                                                                } else {
-                                                                    setFormData({ ...formData, employee_ids: [] })
-                                                                }
-                                                            }}
-                                                        />
-                                                        <span className="text-sm font-medium">Select All</span>
-                                                    </label>
-                                                    <div className="max-h-48 overflow-y-auto">
-                                                        {employees.map((emp: ActiveEmployee) => (
-                                                            <label key={emp.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/30">
-                                                                <input
-                                                                    type="checkbox"
-                                                                    className="rounded border-gray-300"
-                                                                    checked={formData.employee_ids.includes(emp.id)}
-                                                                    onChange={(e) => {
-                                                                        if (e.target.checked) {
-                                                                            setFormData({ ...formData, employee_ids: [...formData.employee_ids, emp.id] })
-                                                                        } else {
-                                                                            setFormData({ ...formData, employee_ids: formData.employee_ids.filter(id => id !== emp.id) })
-                                                                        }
-                                                                    }}
-                                                                />
-                                                                <span className="text-sm">{emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}{emp.is_admin && <span className="ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Admin</span>}</span>
-                                                            </label>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            </div>
+                                            <label className="label">Employees * ({formData.employee_ids.length} selected)</label>
+                                            {renderEmployeeChecklist(
+                                                formData.employee_ids,
+                                                (empId, checked) => {
+                                                    if (checked) {
+                                                        setFormData({ ...formData, employee_ids: [...formData.employee_ids, empId] })
+                                                    } else {
+                                                        setFormData({ ...formData, employee_ids: formData.employee_ids.filter(id => id !== empId) })
+                                                    }
+                                                },
+                                                (ids) => setFormData({ ...formData, employee_ids: ids }),
+                                                () => setFormData({ ...formData, employee_ids: [] })
+                                            )}
                                         </div>
                                     )}
                                 </div>
@@ -2591,12 +2965,14 @@ export default function TasksPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Assign Task Modal */}
             {showAssignModal && assigningTask && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
                     <div className="bg-card rounded-lg shadow-lg w-full max-w-md">
                         <div className="p-6">
                             <h2 className="text-xl font-bold mb-2">Assign Task</h2>
@@ -2604,42 +2980,18 @@ export default function TasksPage() {
                             <form onSubmit={handleAssign} className="space-y-4">
                                 <div>
                                     <label className="label">Employees * ({assignData.employee_ids.length} selected)</label>
-                                    <div className="border rounded-md">
-                                        <label className="flex items-center gap-2 px-3 py-2 border-b bg-muted/30 cursor-pointer hover:bg-muted/50">
-                                            <input
-                                                type="checkbox"
-                                                className="rounded border-gray-300"
-                                                checked={employees.length > 0 && assignData.employee_ids.length === employees.length}
-                                                onChange={(e) => {
-                                                    if (e.target.checked) {
-                                                        setAssignData({ ...assignData, employee_ids: employees.map((emp: ActiveEmployee) => emp.id) })
-                                                    } else {
-                                                        setAssignData({ ...assignData, employee_ids: [] })
-                                                    }
-                                                }}
-                                            />
-                                            <span className="text-sm font-medium">Select All</span>
-                                        </label>
-                                        <div className="max-h-48 overflow-y-auto">
-                                            {employees.map((emp: ActiveEmployee) => (
-                                                <label key={emp.id} className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/30">
-                                                    <input
-                                                        type="checkbox"
-                                                        className="rounded border-gray-300"
-                                                        checked={assignData.employee_ids.includes(emp.id)}
-                                                        onChange={(e) => {
-                                                            if (e.target.checked) {
-                                                                setAssignData({ ...assignData, employee_ids: [...assignData.employee_ids, emp.id] })
-                                                            } else {
-                                                                setAssignData({ ...assignData, employee_ids: assignData.employee_ids.filter(id => id !== emp.id) })
-                                                            }
-                                                        }}
-                                                    />
-                                                    <span className="text-sm">{emp.display_name || 'Unnamed'} {emp.position ? `(${emp.position})` : ''}{emp.is_admin && <span className="ml-1 px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs font-medium">Admin</span>}</span>
-                                                </label>
-                                            ))}
-                                        </div>
-                                    </div>
+                                    {renderEmployeeChecklist(
+                                        assignData.employee_ids,
+                                        (empId, checked) => {
+                                            if (checked) {
+                                                setAssignData({ ...assignData, employee_ids: [...assignData.employee_ids, empId] })
+                                            } else {
+                                                setAssignData({ ...assignData, employee_ids: assignData.employee_ids.filter(id => id !== empId) })
+                                            }
+                                        },
+                                        (ids) => setAssignData({ ...assignData, employee_ids: ids }),
+                                        () => setAssignData({ ...assignData, employee_ids: [] })
+                                    )}
                                 </div>
                                 <div>
                                     <label className="label">Scheduled Date *</label>
@@ -2670,13 +3022,15 @@ export default function TasksPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Task Instance Detail Modal */}
             {showDetailModal && viewingInstance && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl">
                         <div className="p-6">
                             {/* Header */}
                             <div className="flex items-start justify-between mb-6">
@@ -2975,13 +3329,15 @@ export default function TasksPage() {
                             </div>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Task Definition Detail Modal */}
             {showTaskDetailModal && viewingTask && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl">
                         <div className="p-6">
                             {/* Header */}
                             <div className="flex items-start justify-between mb-6">
@@ -2991,6 +3347,9 @@ export default function TasksPage() {
                                         {viewingTask.is_recurring && (
                                             <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
                                                 🔄 {viewingTask.frequency}
+                                                {viewingTask.recurrence_days && viewingTask.recurrence_days.length > 0 && (
+                                                    <span className="ml-1">({viewingTask.recurrence_days.map(d => d.slice(0,3).replace(/^./, c => c.toUpperCase())).join(', ')})</span>
+                                                )}
                                             </span>
                                         )}
                                         {viewingTask.role_target && (
@@ -3175,6 +3534,7 @@ export default function TasksPage() {
                             </div>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
@@ -3187,13 +3547,13 @@ export default function TasksPage() {
                     >
                         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                     </button>
-                    <video
-                        src={fullscreenVideoUrl}
-                        controls
-                        autoPlay
-                        onClick={(e) => e.stopPropagation()}
-                        style={{ maxWidth: '100vw', maxHeight: '100vh' }}
-                    />
+                    <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: '100vw', maxHeight: '100vh' }}>
+                        <VideoPlayer
+                            src={fullscreenVideoUrl}
+                            autoPlay
+                            className="w-screen h-screen"
+                        />
+                    </div>
                 </div>
             )}
         </div>

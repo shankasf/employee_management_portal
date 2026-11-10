@@ -10,6 +10,8 @@ export type ClockStep =
     | 'device_match'
     | 'already_clocked_in'
     | 'gps_capture'
+    | 'break_return'
+    | 'lunch_close'
     | 'db_insert'
     | 'db_update'
     | 'schedule_lookup'
@@ -18,6 +20,9 @@ export type ClockStep =
     | 'complete'
     | 'device_register_start'
     | 'device_register'
+    | 'device_reset_start'
+    | 'device_reset_auth'
+    | 'device_reset'
     | 'error'
 export type ClockStatus = 'pass' | 'fail' | 'info' | 'success'
 

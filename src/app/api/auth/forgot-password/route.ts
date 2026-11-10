@@ -1,7 +1,6 @@
 import { createServiceClient, createUntypedServiceClient } from '@/lib/supabase/server'
 import { NextRequest, NextResponse } from 'next/server'
 import { sendPasswordResetEmail } from '@/lib/email'
-import { sendPasswordResetSMS } from '@/lib/sms'
 import crypto from 'crypto'
 
 interface ProfileData {
@@ -72,23 +71,6 @@ export async function POST(request: NextRequest) {
         if (!emailResult.success) {
             console.error('[ForgotPassword] Failed to send email:', emailResult.error)
             return NextResponse.json({ error: 'Failed to send email' }, { status: 500 })
-        }
-
-        // Try to send SMS if user has a phone number
-        const { data: employeeData } = await supabase
-            .from('employees')
-            .select('phone_number')
-            .eq('id', profile.id)
-            .single()
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const empPhone = (employeeData as any)?.phone_number
-        if (empPhone) {
-            sendPasswordResetSMS({
-                name: profile.full_name || 'User',
-                phone: empPhone,
-                resetUrl,
-            }).catch(err => console.error('[ForgotPassword] Failed to send SMS:', err))
         }
 
         console.log('[ForgotPassword] Reset email sent to:', normalizedEmail)

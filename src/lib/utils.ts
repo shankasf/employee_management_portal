@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/client";
+import { getMediaSrc } from "@/lib/storage-path";
 import { type ClassValue, clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -338,17 +339,14 @@ export function sanitizePhone(phone: string): string {
   return phone.replace(/\D/g, "");
 }
 
-// Get public URL for profile pictures (no signing, no expiry)
-export function getPublicProfilePicUrl(path: string | null | undefined): string | null {
-  if (!path) return null;
-
-  // If it's already a full URL (e.g. from user_metadata), return as-is
-  if (path.startsWith('http://') || path.startsWith('https://')) return path;
-
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  if (!supabaseUrl) return null;
-
-  return `${supabaseUrl}/storage/v1/object/public/profile-pictures/${path}`;
+// Src for an employee profile picture.
+//
+// profile-pictures is a private bucket, so a stored object path resolves to the
+// authenticated /api/media proxy rather than a public storage URL. Full URLs
+// (Google/OAuth avatars out of user_metadata) are passed through untouched.
+// Stays synchronous so avatar render paths don't have to become async.
+export function getProfilePicSrc(path: string | null | undefined): string | null {
+  return getMediaSrc('profile-pictures', path);
 }
 
 // Get signed URL for storage file

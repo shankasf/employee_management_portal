@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { sendTaskReminderEmail } from '@/lib/email'
+import { getEmployeeRecipient } from '@/lib/recipients'
 
 export async function POST(request: NextRequest) {
   try {
@@ -27,15 +28,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'All taskNames must be non-empty strings' }, { status: 400 })
     }
 
-    // Get employee display name
-    const { data: employee, error: empError } = await supabase
-      .from('employees')
-      .select('display_name')
-      .eq('id', user.id)
-      .single()
-
-    if (empError || !employee) {
-      return NextResponse.json({ error: 'Employee not found' }, { status: 404 })
+    const recipient = await getEmployeeRecipient(user.id)
+    if (!recipient) {
+      return NextResponse.json({ success: true, skipped: 'inactive_employee' })
     }
 
     // Use email from auth session (not from request body - prevents spoofing)
@@ -44,7 +39,7 @@ export async function POST(request: NextRequest) {
     }
 
     const result = await sendTaskReminderEmail({
-      employeeName: (employee as { display_name: string }).display_name || 'Employee',
+      employeeName: recipient.displayName || recipient.fullName,
       employeeEmail: user.email,
       taskNames: taskNames as string[],
     })

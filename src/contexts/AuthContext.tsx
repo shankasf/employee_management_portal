@@ -27,6 +27,15 @@ const log = (area: string, message: string, data?: Record<string, unknown>) => {
   console.log(`%c[${ts}] [Auth:${area}] ${message}${dataStr}`, 'color: #4CAF50');
 };
 
+// Always-on logger for auth lifecycle (production-visible) — helps diagnose
+// next-day logouts when the dev-only `log()` is silenced
+const authLog = (area: string, message: string, data?: Record<string, unknown>) => {
+  if (typeof window === 'undefined') return;
+  const ts = new Date().toISOString().split('T')[1].slice(0, 12);
+  const dataStr = data ? ` | ${JSON.stringify(data)}` : '';
+  console.log(`[${ts}] [Auth:${area}] ${message}${dataStr}`);
+};
+
 type Profile = Tables<'profiles'>
 type Employee = Tables<'employees'>
 
@@ -38,6 +47,10 @@ interface AuthContextType {
     isLoading: boolean
     isAdmin: boolean
     isEmployee: boolean
+    // Admin tiers
+    isSuperAdmin: boolean
+    isScopedAdmin: boolean
+    managedBusinessIds: number[]
     signIn: (email: string, password: string) => Promise<{ error: Error | null }>
     signOut: () => Promise<void>
     refreshProfile: () => Promise<void>
@@ -54,6 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const [employee, setEmployee] = useState<Employee | null>(null)
     const [session, setSession] = useState<Session | null>(null)
     const [isLoading, setIsLoading] = useState(true)
+    const [managedBusinessIds, setManagedBusinessIds] = useState<number[]>([])
 
     // Track if we've already fetched profile for current user to prevent duplicates
     const fetchedUserIdRef = useRef<string | null>(null)
@@ -103,6 +117,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                     const p = profileData as Profile;
                     log('fetchProfile', 'Profile loaded', { email: p.email, role: p.role });
                     setProfile(p)
+                    // Load managed locations for scoped admins (drives nav + filtering)
+                    if (p.role === 'admin' && p.admin_scoped) {
+                        try {
+                            const { data: mb } = await supabase
+                                .from('admin_businesses')
+                                .select('business_id')
+                                .eq('admin_id', userId)
+                            setManagedBusinessIds(((mb || []) as { business_id: number }[]).map((r) => r.business_id))
+                        } catch {
+                            setManagedBusinessIds([])
+                        }
+                    } else {
+                        setManagedBusinessIds([])
+                    }
                 }
             } else {
                 log('fetchProfile', 'Profile fetch failed', { reason: String(profileResult.reason) });
@@ -149,6 +177,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const { data: { subscription } } = supabase.auth.onAuthStateChange(
             (event, session) => {
                 log('onAuthStateChange', `Event: ${event}`, { hasSession: !!session, email: session?.user?.email });
+                const nowSec = Math.floor(Date.now() / 1000);
+                authLog('onAuthStateChange', event, {
+                    hasSession: !!session,
+                    email: session?.user?.email,
+                    expiresAt: session?.expires_at,
+                    secondsUntilExpiry: session?.expires_at ? session.expires_at - nowSec : null,
+                    isExpired: session?.expires_at ? session.expires_at <= nowSec : null,
+                    hasRefreshToken: !!session?.refresh_token,
+                });
                 if (!mounted) return
 
                 // Handle INITIAL_SESSION - this is the main event on page refresh
@@ -272,10 +309,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             try {
                 // Use refreshSession() - it proactively refreshes the token
                 // This is more efficient than getUser() which validates against server
+                const t0 = Date.now()
                 const { data: { session: refreshedSession }, error } = await supabase.auth.refreshSession()
+                const elapsedMs = Date.now() - t0
 
                 if (error || !refreshedSession) {
-                    console.warn('Session refresh failed, clearing state...')
+                    authLog('interval-refresh', 'FAILED — clearing state', {
+                        elapsedMs,
+                        errorMessage: error?.message,
+                        errorStatus: (error as { status?: number } | null)?.status,
+                        errorName: error?.name,
+                        path: window.location.pathname,
+                    })
                     fetchedUserIdRef.current = null
                     setUser(null)
                     setProfile(null)
@@ -285,12 +330,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                         window.location.href = '/login?expired=true'
                     }
                 } else {
+                    authLog('interval-refresh', 'ok', {
+                        elapsedMs,
+                        newExpiresAt: refreshedSession.expires_at,
+                    })
                     // Update session without triggering full profile fetch
                     setSession(refreshedSession)
                     setUser(refreshedSession.user)
                 }
             } catch (err) {
-                console.error('Session check error:', err)
+                authLog('interval-refresh', 'threw', { err: String(err) })
             }
         }, 15 * 60 * 1000) // PERFORMANCE: Every 15 minutes (was 10)
 
@@ -330,6 +379,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                     name.toLowerCase().includes('supabase') ||
                     name === 'user_role' ||
                     name === 'user_role_id' ||
+                    name === 'user_admin_scoped' ||
                     name === 'session_validated'
                 ))
                 .forEach((name) => {
@@ -368,6 +418,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isLoading,
         isAdmin: profile?.role === 'admin',
         isEmployee: profile?.role === 'employee',
+        isSuperAdmin: profile?.role === 'admin' && !!profile?.is_super_admin,
+        isScopedAdmin: profile?.role === 'admin' && !!profile?.admin_scoped,
+        managedBusinessIds,
         signIn,
         signOut,
         refreshProfile,

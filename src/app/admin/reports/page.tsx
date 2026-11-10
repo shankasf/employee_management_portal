@@ -4,6 +4,7 @@
 import { useState, useEffect } from 'react'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatDate, formatDateOnly, formatDateTime, formatTime, getSignedStorageUrl, getTodayNY, getDateNY, getNYDayBoundary } from '@/lib/utils'
+import { VideoPlayer } from '@/components/VideoPlayer'
 
 // Using 'any' type for Supabase joined data
 type TaskCompletion = any
@@ -1084,8 +1085,9 @@ export default function ReportsPage() {
 
             {/* Task Detail Modal */}
             {selectedCompletion && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-2xl">
                         <div className="p-6">
                             <div className="flex items-start justify-between mb-4">
                                 <div>
@@ -1166,9 +1168,8 @@ export default function ReportsPage() {
                                     <div>
                                         <p className="font-medium mb-2">🎥 Video Submission:</p>
                                         {signedVideoUrl ? (
-                                            <video
+                                            <VideoPlayer
                                                 src={signedVideoUrl}
-                                                controls
                                                 className="max-w-full h-auto rounded-lg border max-h-96"
                                             />
                                         ) : (
@@ -1200,6 +1201,7 @@ export default function ReportsPage() {
                                 </button>
                             </div>
                         </div>
+                    </div>
                     </div>
                 </div>
             )}

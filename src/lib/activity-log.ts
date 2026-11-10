@@ -33,6 +33,17 @@ export type ActivityAction =
     | 'policy_created'
     | 'policy_deleted'
     | 'attendance_time_edited'
+    | 'clock_in_reminder_sent'
+    | 'clock_out_reminder_sent'
+    | 'onboarding_content_created'
+    | 'onboarding_content_updated'
+    | 'onboarding_content_deleted'
+    | 'onboarding_item_completed'
+    | 'onboarding_completed'
+    | 'onboarding_completion_acknowledged'
+    | 'onboarding_completions_bulk_acknowledged'
+    | 'onboarding_completion_email_sent'
+    | 'onboarding_completion_email_failed'
 
 export type EntityType =
     | 'employee'
@@ -42,6 +53,8 @@ export type EntityType =
     | 'event'
     | 'policy'
     | 'attendance'
+    | 'onboarding_content'
+    | 'onboarding_completion'
 
 export interface ActivityLogEntry {
     adminId: string | null
@@ -145,6 +158,17 @@ export function formatAction(action: ActivityAction): string {
         policy_created: 'Created policy',
         policy_deleted: 'Deleted policy',
         attendance_time_edited: 'Edited attendance time',
+        clock_in_reminder_sent: 'Sent clock-in reminder',
+        clock_out_reminder_sent: 'Sent clock-out reminder',
+        onboarding_content_created: 'Created onboarding content',
+        onboarding_content_updated: 'Updated onboarding content',
+        onboarding_content_deleted: 'Deleted onboarding content',
+        onboarding_item_completed: 'Completed onboarding item',
+        onboarding_completed: 'Completed onboarding',
+        onboarding_completion_acknowledged: 'Acknowledged onboarding completion',
+        onboarding_completions_bulk_acknowledged: 'Bulk acknowledged onboarding completions',
+        onboarding_completion_email_sent: 'Sent onboarding completion email',
+        onboarding_completion_email_failed: 'Onboarding completion email failed',
     }
     return actionLabels[action] || action
 }

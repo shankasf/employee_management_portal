@@ -35,6 +35,12 @@ const ADMIN_EMAILS = [
   'playfunia@playfunia.com',
 ].filter(Boolean)
 
+// Admin accounts that should NOT receive notification emails (still admins, just opted out)
+const BLOCKED_ADMIN_EMAILS = new Set<string>([
+  'callsphereny@gmail.com',
+  'ali@realinternational.tech',
+])
+
 // Create reusable transporter
 const transporter = nodemailer.createTransport(emailConfig)
 
@@ -119,7 +125,8 @@ export async function getAdminEmails(): Promise<string[]> {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const emails = data?.filter((r: any) => r.status === 'active').map((r: any) => r.email).filter(Boolean) || []
+  const emails = data?.filter((r: any) => r.status === 'active').map((r: any) => r.email).filter(Boolean)
+    .filter((e: string) => !BLOCKED_ADMIN_EMAILS.has(e.toLowerCase())) || []
   console.log('[getAdminEmails] Active admin emails:', emails)
   return emails
 }
@@ -150,7 +157,9 @@ export async function getAllNotificationRecipients(): Promise<string[]> {
     ...adminEmails
   ])
 
-  const result = Array.from(allRecipients).filter(Boolean)
+  const result = Array.from(allRecipients)
+    .filter(Boolean)
+    .filter((e) => !BLOCKED_ADMIN_EMAILS.has(e.toLowerCase()))
   console.log('[getAllNotificationRecipients] Final recipients:', result)
   return result
 }
@@ -1389,6 +1398,163 @@ export async function sendPasswordResetEmail(data: PasswordResetEmailData): Prom
   return sendEmail({
     to: data.email,
     subject: 'Reset Your Password - PlayFunia Employee Portal',
+    html,
+  })
+}
+
+// ============================================
+// CLOCK-IN REMINDER EMAIL
+// ============================================
+
+interface ClockInReminderEmailData {
+  employeeName: string
+  employeeEmail: string
+  scheduleDate: string
+  startTime: string
+  endTime: string
+  location?: string
+}
+
+export async function sendClockInReminderEmail(data: ClockInReminderEmailData): Promise<{ success: boolean; error?: string }> {
+  const html = wrapInTemplate(`
+    <div class="header" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);">
+      <h1>Clock-In Reminder</h1>
+    </div>
+    <div class="content">
+      <p>Hi ${escapeHtml(data.employeeName)},</p>
+      <p>Your shift was scheduled to start at <strong>${escapeHtml(data.startTime)}</strong> but we haven't recorded a clock-in yet. Please clock in as soon as possible.</p>
+
+      <div class="info-box">
+        <p class="label">Schedule Details</p>
+        <p><strong>Date:</strong> ${escapeHtml(data.scheduleDate)}</p>
+        <p><strong>Shift:</strong> ${escapeHtml(data.startTime)} - ${escapeHtml(data.endTime)}</p>
+        ${data.location ? `<p><strong>Location:</strong> ${escapeHtml(data.location)}</p>` : ''}
+      </div>
+
+      <p style="text-align: center;">
+        <a href="https://admin.playfunia.com/employee/attendance" class="button" style="background: #ef4444;">Clock In Now</a>
+      </p>
+    </div>
+  `)
+
+  return sendEmail({
+    to: data.employeeEmail,
+    subject: `Reminder: Please Clock In - Shift Started at ${data.startTime}`,
+    html,
+  })
+}
+
+// ============================================
+// CLOCK-OUT REMINDER EMAIL
+// ============================================
+
+interface ClockOutReminderEmailData {
+  employeeName: string
+  employeeEmail: string
+  scheduleDate: string
+  startTime: string
+  endTime: string
+  location?: string
+}
+
+export async function sendClockOutReminderEmail(data: ClockOutReminderEmailData): Promise<{ success: boolean; error?: string }> {
+  const html = wrapInTemplate(`
+    <div class="header" style="background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);">
+      <h1>Clock-Out Reminder</h1>
+    </div>
+    <div class="content">
+      <p>Hi ${escapeHtml(data.employeeName)},</p>
+      <p>Your shift was scheduled to end at <strong>${escapeHtml(data.endTime)}</strong> but we haven't recorded a clock-out yet. Please clock out as soon as possible.</p>
+
+      <div class="info-box">
+        <p class="label">Schedule Details</p>
+        <p><strong>Date:</strong> ${escapeHtml(data.scheduleDate)}</p>
+        <p><strong>Shift:</strong> ${escapeHtml(data.startTime)} - ${escapeHtml(data.endTime)}</p>
+        ${data.location ? `<p><strong>Location:</strong> ${escapeHtml(data.location)}</p>` : ''}
+      </div>
+
+      <p style="text-align: center;">
+        <a href="https://admin.playfunia.com/employee/attendance" class="button" style="background: #f97316;">Clock Out Now</a>
+      </p>
+    </div>
+  `)
+
+  return sendEmail({
+    to: data.employeeEmail,
+    subject: `Reminder: Please Clock Out - Shift Ended at ${data.endTime}`,
+    html,
+  })
+}
+
+// ============================================
+// ONBOARDING COMPLETION EMAIL (admins)
+// ============================================
+
+interface OnboardingCompletionEmailData {
+  employeeName: string
+  employeeEmail: string
+  businessName: string
+  businessLocation: string | null
+  completedAt: string // ISO string
+  totalRequired: number
+}
+
+export async function sendOnboardingCompletionEmail(
+  data: OnboardingCompletionEmailData
+): Promise<{ success: boolean; error?: string }> {
+  const recipients = await getAllNotificationRecipients()
+  if (recipients.length === 0) {
+    return { success: false, error: 'No notification recipients configured' }
+  }
+
+  const businessLabel = data.businessLocation
+    ? `${data.businessName} — ${data.businessLocation}`
+    : data.businessName
+
+  const completedDateNY = new Date(data.completedAt).toLocaleString('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  })
+
+  const html = wrapInTemplate(`
+    <div class="header" style="background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);">
+      <h1>Onboarding Completed</h1>
+    </div>
+    <div class="content">
+      <p>An employee has completed their onboarding.</p>
+
+      <div class="info-box">
+        <p class="label">Employee</p>
+        <p class="value">${escapeHtml(data.employeeName)}</p>
+        <p style="color:#6b7280;font-size:14px;margin:4px 0 0 0;">${escapeHtml(data.employeeEmail)}</p>
+      </div>
+
+      <div class="info-box">
+        <p class="label">Company / Location</p>
+        <p class="value">${escapeHtml(businessLabel)}</p>
+      </div>
+
+      <div class="info-box">
+        <p class="label">Completed</p>
+        <p class="value">${escapeHtml(completedDateNY)}</p>
+        <p style="color:#6b7280;font-size:14px;margin:4px 0 0 0;">${data.totalRequired} required item${data.totalRequired === 1 ? '' : 's'} completed</p>
+      </div>
+
+      <p style="text-align: center;">
+        <a href="https://admin.playfunia.com/admin/onboarding/progress" class="button" style="background:#16a34a;">View Progress Dashboard</a>
+      </p>
+    </div>
+  `)
+
+  return sendEmail({
+    to: recipients,
+    subject: `Onboarding Completed: ${data.employeeName} — ${businessLabel}`,
     html,
   })
 }

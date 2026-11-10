@@ -1,10 +1,12 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import Link from 'next/link'
 import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
-import { formatTime, formatDateTime, formatTimeString, getTodayNY, getNYOffsetStr } from '@/lib/utils'
+import { formatDateTime, formatTimeString, getTodayNY, getNYOffsetStr } from '@/lib/utils'
 import { RichTextDisplay } from '@/components/RichTextEditor'
+import DeviceResetModal from '@/components/DeviceResetModal'
 import { getDeviceInfo, formatDeviceDisplay } from '@/lib/device'
 import { captureLocation } from '@/lib/geolocation'
 import { logClockDebug } from '@/lib/clock-debug-log'
@@ -17,7 +19,44 @@ import {
     invalidateQueries
 } from '@/lib/hooks/useData'
 import useSWR from 'swr'
+import NavIcon from '@/components/pwa/NavIcon'
 import { logPageView, logButtonClick } from '@/lib/usage-log'
+import PushReminderPrompt from '@/components/pwa/PushReminderPrompt'
+import type { PushStatus } from '@/lib/push-client'
+
+interface OpenAttendance {
+    id: string
+    clock_in: string
+    break_start?: string | null
+    break_minutes?: number | null
+}
+
+interface PendingTrainingItem {
+    id: string
+    business_id: number
+    business_name: string
+    type: string
+    subtype: string | null
+    title: string
+}
+
+interface PendingTrainingSummary {
+    new_count: number
+    in_progress_count: number
+    total_pending: number
+    items: PendingTrainingItem[]
+}
+
+function trainingIcon(item: PendingTrainingItem): string {
+    if (item.type === 'video' || item.subtype === 'video') return '🎥'
+    if (item.subtype === 'pdf') return '📄'
+    if (item.subtype === 'image') return '🖼️'
+    if (item.subtype === 'audio') return '🎧'
+    if (item.subtype === 'docx') return '📑'
+    if (item.type === 'document') return '📄'
+    if (item.type === 'article') return '📝'
+    return '📚'
+}
 
 interface Task {
     id: string
@@ -55,8 +94,14 @@ export default function EmployeeDashboard() {
 
     // Device registration state
     const [showDevicePrompt, setShowDevicePrompt] = useState(false)
+    const [showDeviceReset, setShowDeviceReset] = useState(false)
     const [deviceRegistering, setDeviceRegistering] = useState(false)
     const [currentDeviceInfo, setCurrentDeviceInfo] = useState<{ deviceId: string; deviceName: string } | null>(null)
+
+    // Lunch (break) state
+    const [lunchLoading, setLunchLoading] = useState(false)
+    const [nowTick, setNowTick] = useState(() => Date.now())
+    const [pushStatus, setPushStatus] = useState<PushStatus>('loading')
 
     // Pending tasks reminder state
     const [showPendingTasksModal, setShowPendingTasksModal] = useState(false)
@@ -92,6 +137,24 @@ export default function EmployeeDashboard() {
     const { data: fallbackEvents } = useMyUpcomingEvents(fallbackKey)
     const { data: fallbackPolicies } = useActivePolicies() // Always fetch - used as fallback for dashboard too
 
+    // Fetch pending training summary so we can surface newly assigned
+    // training videos / documents on the dashboard. Shares an SWR key with
+    // the layout's nav badge so a single request serves both.
+    const { data: pendingTraining } = useSWR<PendingTrainingSummary>(
+        user?.id ? ['employee:onboarding:pending', user.id] : null,
+        async () => {
+            const res = await fetch('/api/onboarding/pending', { credentials: 'include' })
+            if (!res.ok) throw new Error('Failed to load training')
+            return res.json()
+        },
+        {
+            refreshInterval: 30000,
+            revalidateOnFocus: true,
+            revalidateOnReconnect: true,
+            dedupingInterval: 15000,
+        }
+    )
+
     // Fetch device info with SWR for caching (fallback)
     const { data: fallbackDeviceData } = useSWR(
         useFallback && user?.id ? ['employee:device', user.id] : null,
@@ -109,8 +172,9 @@ export default function EmployeeDashboard() {
 
     // Use combined data if available, otherwise use fallback
     const clockedIn = useFallback
-        ? fallbackAttendance as { id: string; clock_in: string } | null
-        : dashboard?.open_attendance as { id: string; clock_in: string } | null
+        ? fallbackAttendance as OpenAttendance | null
+        : dashboard?.open_attendance as OpenAttendance | null
+    const onLunch = !!clockedIn?.break_start
     const tasks: Task[] = useFallback
         ? (fallbackTasks || []) as Task[]
         : (dashboard?.today_tasks || []) as Task[]
@@ -125,6 +189,45 @@ export default function EmployeeDashboard() {
 
     // Mutate function for attendance updates
     const mutateAttendance = useFallback ? mutateFallbackAttendance : mutateDashboard
+
+    // Read receipts for important messages — fetch IDs the current employee
+    // has already acknowledged so we can render them as read.
+    const { data: readPolicyIds, mutate: mutateReads } = useSWR<string[]>(
+        user?.id ? ['employee:policies:reads', user.id] : null,
+        async () => {
+            const supabase = createUntypedClient()
+            const { data, error } = await supabase
+                .from('policy_strip_reads')
+                .select('policy_strip_id')
+                .eq('employee_id', user!.id)
+            if (error) throw error
+            return ((data || []) as Array<{ policy_strip_id: string }>).map(r => r.policy_strip_id)
+        },
+        { revalidateOnFocus: true, dedupingInterval: 15000 }
+    )
+    const readPolicySet = new Set<string>(readPolicyIds || [])
+    const [markingReadId, setMarkingReadId] = useState<string | null>(null)
+
+    const markPolicyRead = async (policyId: string) => {
+        setMarkingReadId(policyId)
+        // Optimistic update
+        mutateReads([...(readPolicyIds || []), policyId], false)
+        try {
+            const res = await fetch('/api/policies/read', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ policy_id: policyId }),
+                credentials: 'include',
+            })
+            if (!res.ok) throw new Error('Failed')
+            mutateReads()
+        } catch {
+            mutateReads()
+            alert('Failed to mark as read. Please try again.')
+        } finally {
+            setMarkingReadId(null)
+        }
+    }
 
     const registeredDeviceId = deviceData?.registered_device_id || null
     const registeredDeviceName = deviceData?.device_name || null
@@ -399,10 +502,24 @@ export default function EmployeeDashboard() {
                 }
             }
 
-            // Step 5: DB update
+            // Step 5: DB update. An open lunch is closed in the same write so
+            // the hours trigger subtracts it and no break_start is left behind.
+            const breakClose: { break_start?: null; break_minutes?: number; break_reminder_sent_at?: null } = {}
+            if (clockedIn.break_start) {
+                const lunchMinutes = Math.max(1, Math.round((actualClockOutTime.getTime() - new Date(clockedIn.break_start).getTime()) / 60000))
+                breakClose.break_start = null
+                breakClose.break_reminder_sent_at = null
+                breakClose.break_minutes = (clockedIn.break_minutes || 0) + lunchMinutes
+                logClockDebug('clock_out', 'lunch_close', 'info', `Closing open lunch: ${lunchMinutes} min`, {
+                    breakStart: clockedIn.break_start,
+                    lunchMinutes,
+                }, currentDeviceInfo)
+            }
+
             const { data, error } = await supabase
                 .from('attendance_logs')
                 .update({
+                    ...breakClose,
                     clock_out: effectiveClockOut,
                     actual_clock_out: actualClockOutValue,
                     late_clock_out_minutes: lateClockOutMinutes,
@@ -433,15 +550,19 @@ export default function EmployeeDashboard() {
                 effectiveClockOut,
             }, currentDeviceInfo)
 
-            // Step 6: Hours calculation fallback
-            if (data && data.clock_in && !data.total_hours) {
+            // Step 6: Hours calculation fallback (only when the DB trigger left it
+            // null; a legitimate 0 must not be overwritten). Subtract lunch and
+            // never go below zero, matching compute_total_hours().
+            if (data && data.clock_in && (data.total_hours === null || data.total_hours === undefined)) {
                 const clockInTime = new Date(data.clock_in).getTime()
                 const clockOutTimeMs = new Date(effectiveClockOut).getTime()
-                const totalHours = (clockOutTimeMs - clockInTime) / (1000 * 60 * 60)
+                const breakMins = data.break_minutes || 0
+                const totalHours = Math.round(Math.max(0, (clockOutTimeMs - clockInTime) / (1000 * 60 * 60) - breakMins / 60) * 100) / 100
 
-                logClockDebug('clock_out', 'hours_calc', 'info', `Fallback hours calc: ${totalHours.toFixed(2)}h`, {
+                logClockDebug('clock_out', 'hours_calc', 'info', `Fallback hours calc: ${totalHours.toFixed(2)}h (break: ${breakMins}m)`, {
                     clockIn: data.clock_in,
                     clockOut: effectiveClockOut,
+                    breakMins,
                     totalHours,
                 }, currentDeviceInfo)
 
@@ -466,6 +587,75 @@ export default function EmployeeDashboard() {
             alert(`Failed to clock out: ${errorMessage}`)
         } finally {
             setClockLoading(false)
+        }
+    }
+
+    // Refresh the "on lunch for N min" counter while a lunch is open
+    useEffect(() => {
+        if (!onLunch) return
+        const t = setInterval(() => setNowTick(Date.now()), 30000)
+        return () => clearInterval(t)
+    }, [onLunch])
+
+    const lunchElapsedMinutes = clockedIn?.break_start
+        ? Math.max(0, Math.floor((nowTick - new Date(clockedIn.break_start).getTime()) / 60000))
+        : 0
+
+    // Start Lunch: stamp break_start on the open attendance row. The 30-minute
+    // reminder cron watches this column.
+    const handleStartLunch = async () => {
+        if (!user?.id || !clockedIn || onLunch) return
+        setLunchLoading(true)
+        try {
+            const supabase = createUntypedClient()
+            const { data, error } = await supabase
+                .from('attendance_logs')
+                .update({ break_start: new Date().toISOString(), break_reminder_sent_at: null })
+                .eq('id', clockedIn.id)
+                .is('break_start', null)
+                .is('clock_out', null)
+                .select('id')
+            if (error) throw error
+            if (!data || data.length === 0) throw new Error('Lunch already started or shift closed')
+            logButtonClick('Start Lunch', 'attendance', { attendanceId: clockedIn.id })
+            setNowTick(Date.now())
+            mutateAttendance()
+        } catch (err) {
+            console.error('Start lunch error:', err)
+            alert('Could not start lunch. Please try again.')
+            mutateAttendance()
+        } finally {
+            setLunchLoading(false)
+        }
+    }
+
+    // End Lunch: fold the elapsed minutes into break_minutes and clear break_start.
+    const handleEndLunch = async () => {
+        if (!user?.id || !clockedIn?.break_start) return
+        setLunchLoading(true)
+        try {
+            const supabase = createUntypedClient()
+            const minutes = Math.max(1, Math.round((Date.now() - new Date(clockedIn.break_start).getTime()) / 60000))
+            const { data, error } = await supabase
+                .from('attendance_logs')
+                .update({
+                    break_start: null,
+                    break_reminder_sent_at: null,
+                    break_minutes: (clockedIn.break_minutes || 0) + minutes,
+                })
+                .eq('id', clockedIn.id)
+                .not('break_start', 'is', null)
+                .select('id')
+            if (error) throw error
+            if (!data || data.length === 0) throw new Error('Lunch was already ended')
+            logButtonClick('End Lunch', 'attendance', { attendanceId: clockedIn.id, minutes })
+            mutateAttendance()
+        } catch (err) {
+            console.error('End lunch error:', err)
+            alert('Could not end lunch. Please try again.')
+            mutateAttendance()
+        } finally {
+            setLunchLoading(false)
         }
     }
 
@@ -530,6 +720,17 @@ export default function EmployeeDashboard() {
     return (
         <div className="space-y-4 sm:space-y-6">
             {/* Device Registration Modal */}
+            {/* New Device? — self-service device re-registration */}
+            <DeviceResetModal
+                open={showDeviceReset}
+                onClose={() => setShowDeviceReset(false)}
+                userEmail={user?.email}
+                currentDeviceInfo={currentDeviceInfo}
+                registeredDeviceName={registeredDeviceName}
+                registeredDeviceId={registeredDeviceId}
+                onRegistered={() => mutateAttendance()}
+            />
+
             {showDevicePrompt && (
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
                     <div className="bg-card rounded-xl shadow-xl w-full max-w-md border">
@@ -679,68 +880,180 @@ export default function EmployeeDashboard() {
                 </p>
             </div>
 
+            {/* Turn on browser reminders (hidden once enabled) */}
+            <PushReminderPrompt onStatusChange={setPushStatus} />
+
             {/* Clock In/Out Card */}
-            <div className="card">
-                <div className="p-4 sm:p-6">
-                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 sm:gap-4">
-                        <div>
-                            <h2 className="text-base sm:text-lg font-semibold">Time Clock</h2>
-                            {clockedIn ? (
-                                <p className="text-muted-foreground text-sm">
-                                    Clocked in at {formatTime(clockedIn.clock_in)}
-                                </p>
-                            ) : (
-                                <p className="text-muted-foreground text-sm">You are not clocked in</p>
-                            )}
-                            {/* Device Status Indicator */}
-                            {registeredDeviceId && (
-                                <p className={`text-xs mt-1 ${deviceMismatch ? 'text-red-600' : 'text-green-600'}`}>
-                                    {deviceMismatch ? (
-                                        <>🚫 Wrong device - use {formatDeviceDisplay(registeredDeviceName, registeredDeviceId)}</>
-                                    ) : (
-                                        <>✓ Registered device: {formatDeviceDisplay(registeredDeviceName, registeredDeviceId)}</>
-                                    )}
-                                </p>
-                            )}
-                            {!registeredDeviceId && (
-                                <p className="text-xs mt-1 text-yellow-600">
-                                    ⚠️ No device registered - click Clock In to register
-                                </p>
-                            )}
+            <div className="card rounded-2xl shadow-[0_4px_16px_rgba(15,23,42,0.06)]">
+                <div className="p-5 sm:p-6">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+                        <div className="flex items-center gap-3 min-w-0">
+                            <div className={`flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-2xl ${onLunch ? 'bg-amber-100 text-amber-600 dark:bg-amber-950 dark:text-amber-400' : clockedIn ? 'bg-green-100 text-green-600 dark:bg-green-950 dark:text-green-400' : 'bg-indigo-50 text-indigo-500 dark:bg-indigo-950 dark:text-indigo-300'}`}>
+                                <NavIcon name="clock" className="h-6 w-6" />
+                            </div>
+                            <div className="min-w-0">
+                                <h2 className="text-lg font-semibold">Time Clock</h2>
+                                {clockedIn && onLunch ? (
+                                    <p className="text-sm font-medium text-amber-700 dark:text-amber-300" data-testid="lunch-status">
+                                        On lunch for {lunchElapsedMinutes} min{lunchElapsedMinutes >= 30 ? ' — time to clock back in' : ''}
+                                    </p>
+                                ) : clockedIn ? (
+                                    <p className="text-muted-foreground text-sm">
+                                        Clocked in at {formatDateTime(clockedIn.clock_in)}
+                                        {(clockedIn.break_minutes || 0) > 0 ? ` · ${clockedIn.break_minutes} min lunch taken` : ''}
+                                    </p>
+                                ) : (
+                                    <p className="text-muted-foreground text-sm">You are not clocked in</p>
+                                )}
+                            </div>
                         </div>
                         <div className="flex flex-col gap-2 w-full sm:w-auto">
                             <button
                                 onClick={clockedIn ? handleClockOut : handleClockIn}
                                 disabled={clockLoading || (!clockedIn && deviceMismatch)}
-                                className={`${clockedIn ? 'btn-destructive' : 'btn-primary'
-                                    } w-full sm:w-auto min-w-[120px] sm:min-w-[150px] flex items-center justify-center gap-2 ${
-                                    !clockedIn && deviceMismatch ? 'opacity-50 cursor-not-allowed' : ''
-                                    }`}
+                                className={`inline-flex h-14 w-full sm:w-auto sm:min-w-[180px] items-center justify-center gap-2 rounded-2xl px-6 text-base font-semibold text-white transition-transform active:scale-[0.98] ${clockedIn
+                                    ? 'bg-destructive shadow-[0_6px_16px_-4px_rgba(239,68,68,0.45)]'
+                                    : 'bg-gradient-to-r from-indigo-500 to-violet-500 shadow-[0_6px_16px_-4px_rgba(99,102,241,0.5)]'
+                                    } ${!clockedIn && deviceMismatch ? 'opacity-50 cursor-not-allowed' : ''}`}
                             >
                                 {clockLoading ? (
                                     <>
-                                        <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                                        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
                                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
                                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                                         </svg>
                                         {clockedIn ? 'Clocking Out...' : 'Clocking In...'}
                                     </>
                                 ) : clockedIn ? (
-                                    <>🚪 Clock Out</>
+                                    <><NavIcon name="logout" className="h-5 w-5" strokeWidth={2} /> Clock Out</>
                                 ) : (
-                                    <>⏰ Clock In</>
+                                    <><NavIcon name="clock" className="h-5 w-5" strokeWidth={2} /> Clock In</>
                                 )}
                             </button>
+                            {/* Start / End Lunch */}
+                            {clockedIn && (
+                                <button
+                                    type="button"
+                                    onClick={onLunch ? handleEndLunch : handleStartLunch}
+                                    disabled={lunchLoading || clockLoading}
+                                    data-testid={onLunch ? 'end-lunch' : 'start-lunch'}
+                                    className={`inline-flex h-12 w-full sm:w-auto sm:min-w-[180px] items-center justify-center gap-2 rounded-2xl px-6 text-sm font-semibold transition-transform active:scale-[0.98] disabled:opacity-60 ${onLunch
+                                        ? 'bg-amber-500 text-white shadow-[0_6px_16px_-4px_rgba(245,158,11,0.5)]'
+                                        : 'border border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200'
+                                        }`}
+                                >
+                                    {lunchLoading ? (
+                                        onLunch ? 'Ending lunch…' : 'Starting lunch…'
+                                    ) : onLunch ? (
+                                        <>🍽️ End Lunch</>
+                                    ) : (
+                                        <>🍽️ Start Lunch</>
+                                    )}
+                                </button>
+                            )}
                             {/* Device mismatch hint */}
                             {deviceMismatch && !clockedIn && (
-                                <p className="text-xs text-red-600 dark:text-red-400 text-center">
-                                    You can only clock in from your registered device.
-                                </p>
+                                <>
+                                    <p className="text-xs text-red-600 dark:text-red-400 text-center">
+                                        You can only clock in from your registered device.
+                                    </p>
+                                    <button
+                                        onClick={() => setShowDeviceReset(true)}
+                                        className="btn-secondary w-full text-sm h-11"
+                                    >
+                                        Using a new device? Register it
+                                    </button>
+                                </>
                             )}
                         </div>
                     </div>
+
+                    {/* Device Status */}
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                        {registeredDeviceId && (
+                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${deviceMismatch ? 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300' : 'bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300'}`}>
+                                {deviceMismatch ? (
+                                    <>Wrong device: use {formatDeviceDisplay(registeredDeviceName, registeredDeviceId)}</>
+                                ) : (
+                                    <><svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>Registered device: {formatDeviceDisplay(registeredDeviceName, registeredDeviceId)}</>
+                                )}
+                            </span>
+                        )}
+                        {!registeredDeviceId && (
+                            <span className="inline-flex items-center rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                                No device registered yet. Tap Clock In to register this phone.
+                            </span>
+                        )}
+                        {registeredDeviceId && !deviceMismatch && (
+                            <button
+                                onClick={() => setShowDeviceReset(true)}
+                                className="inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium text-primary hover:bg-primary/10"
+                            >
+                                New device? Register this one
+                            </button>
+                        )}
+                        {pushStatus === 'subscribed' && (
+                            <span data-testid="reminders-on" className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></svg>
+                                Shift &amp; lunch reminders on
+                            </span>
+                        )}
+                    </div>
                 </div>
             </div>
+
+            {/* New Training Assigned */}
+            {pendingTraining && pendingTraining.total_pending > 0 && (
+                <Link
+                    href="/employee/onboarding"
+                    className="block card hover:shadow-md transition-shadow border-indigo-200 dark:border-indigo-800 bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20"
+                >
+                    <div className="p-4 sm:p-6">
+                        <div className="flex items-start justify-between gap-3 sm:gap-4 mb-3">
+                            <div className="flex items-start gap-3 min-w-0">
+                                <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 text-white text-xl sm:text-2xl flex items-center justify-center shadow-md flex-shrink-0">
+                                    📚
+                                </div>
+                                <div className="min-w-0">
+                                    <h2 className="text-base sm:text-lg font-semibold text-indigo-900 dark:text-indigo-100">
+                                        {pendingTraining.new_count > 0
+                                            ? `${pendingTraining.new_count} new training item${pendingTraining.new_count !== 1 ? 's' : ''} assigned`
+                                            : 'Training in progress'}
+                                    </h2>
+                                    <p className="text-xs sm:text-sm text-indigo-700 dark:text-indigo-300 mt-0.5">
+                                        {pendingTraining.in_progress_count > 0 && pendingTraining.new_count > 0 && (
+                                            <>+ {pendingTraining.in_progress_count} in progress · </>
+                                        )}
+                                        {pendingTraining.in_progress_count > 0 && pendingTraining.new_count === 0 && (
+                                            <>{pendingTraining.in_progress_count} item{pendingTraining.in_progress_count !== 1 ? 's' : ''} to finish · </>
+                                        )}
+                                        Tap to view
+                                    </p>
+                                </div>
+                            </div>
+                            <span className="text-indigo-600 dark:text-indigo-400 text-xl sm:text-2xl flex-shrink-0">→</span>
+                        </div>
+                        {pendingTraining.items.length > 0 && (
+                            <ul className="space-y-1.5 mt-3">
+                                {pendingTraining.items.map((item) => (
+                                    <li
+                                        key={item.id}
+                                        className="flex items-center gap-2 text-sm text-indigo-900 dark:text-indigo-100"
+                                    >
+                                        <span className="flex-shrink-0">{trainingIcon(item)}</span>
+                                        <span className="truncate">{item.title}</span>
+                                        {item.business_name && (
+                                            <span className="text-xs text-indigo-600 dark:text-indigo-400 truncate hidden sm:inline">
+                                                · {item.business_name}
+                                            </span>
+                                        )}
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                    </div>
+                </Link>
+            )}
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
                 {/* Today's Tasks */}
@@ -846,40 +1159,77 @@ export default function EmployeeDashboard() {
                 </div>
             </div>
 
-            {/* Policy Messages */}
+            {/* Important Messages */}
             {policies.length > 0 && (
                 <div className="card">
                     <div className="card-header">
                         <h2 className="card-title text-base sm:text-lg flex items-center gap-2">
                             📋 Important Messages
+                            {(() => {
+                                const unread = policies.filter(p => !readPolicySet.has(p.id)).length
+                                return unread > 0 ? (
+                                    <span className="badge-warning text-xs">{unread} unread</span>
+                                ) : null
+                            })()}
                         </h2>
                     </div>
                     <div className="card-content">
                         <div className="space-y-2 sm:space-y-3">
-                            {policies.map((policy) => (
-                                <div
-                                    key={policy.id}
-                                    className="p-3 sm:p-4 rounded-lg border bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800"
-                                >
-                                    <div className="flex items-start gap-2 sm:gap-3">
-                                        <span className="text-base sm:text-lg flex-shrink-0">📌</span>
-                                        <div className="min-w-0 flex-1">
-                                            <p className="font-medium text-blue-900 dark:text-blue-100 text-sm sm:text-base">
-                                                {policy.title}
-                                            </p>
-                                            <RichTextDisplay
-                                                content={policy.content}
-                                                className="text-xs sm:text-sm text-blue-800 dark:text-blue-200 mt-1"
-                                            />
-                                            {policy.category && (
-                                                <span className="badge-outline text-xs mt-2 inline-block">
-                                                    {policy.category}
-                                                </span>
-                                            )}
+                            {policies.map((policy) => {
+                                const isRead = readPolicySet.has(policy.id)
+                                return (
+                                    <div
+                                        key={policy.id}
+                                        className={`p-3 sm:p-4 rounded-lg border transition-opacity ${
+                                            isRead
+                                                ? 'bg-muted/40 border-border opacity-70'
+                                                : 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800'
+                                        }`}
+                                    >
+                                        <div className="flex items-start gap-2 sm:gap-3">
+                                            <span className="text-base sm:text-lg flex-shrink-0">
+                                                {isRead ? '✅' : '📌'}
+                                            </span>
+                                            <div className="min-w-0 flex-1">
+                                                <p className={`font-medium text-sm sm:text-base ${
+                                                    isRead
+                                                        ? 'text-muted-foreground'
+                                                        : 'text-blue-900 dark:text-blue-100'
+                                                }`}>
+                                                    {policy.title}
+                                                </p>
+                                                <RichTextDisplay
+                                                    content={policy.content}
+                                                    className={`text-xs sm:text-sm mt-1 ${
+                                                        isRead
+                                                            ? 'text-muted-foreground'
+                                                            : 'text-blue-800 dark:text-blue-200'
+                                                    }`}
+                                                />
+                                                <div className="flex items-center justify-between gap-2 mt-3 flex-wrap">
+                                                    {policy.category ? (
+                                                        <span className="badge-outline text-xs">{policy.category}</span>
+                                                    ) : <span />}
+                                                    {isRead ? (
+                                                        <span className="text-xs text-green-700 dark:text-green-300 font-medium">
+                                                            ✓ Marked as read
+                                                        </span>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => markPolicyRead(policy.id)}
+                                                            disabled={markingReadId === policy.id}
+                                                            className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50"
+                                                        >
+                                                            {markingReadId === policy.id ? 'Marking…' : 'Mark as Read'}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
-                            ))}
+                                )
+                            })}
                         </div>
                     </div>
                 </div>

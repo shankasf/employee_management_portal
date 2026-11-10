@@ -109,11 +109,16 @@ export async function GET(request: NextRequest) {
         // Check admin role
         const { data: profile } = await supabase
             .from('profiles')
-            .select('role')
+            .select('role, admin_scoped')
             .eq('id', user.id)
             .single()
 
-        if ((profile as { role: string } | null)?.role !== 'admin') {
+        const _p = profile as { role: string; admin_scoped?: boolean } | null
+        if (_p?.role !== 'admin') {
+            return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+        }
+        // Upload logs are a company-wide diagnostic; not available to scoped admins.
+        if (_p?.admin_scoped) {
             return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
         }
 

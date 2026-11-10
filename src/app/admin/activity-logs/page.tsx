@@ -457,6 +457,17 @@ export default function ActivityLogsPage() {
                             <option value="tasks_loaded">Tasks Loaded</option>
                             <option value="tasks_load_failed">Tasks Load Failed</option>
                         </optgroup>
+                        <optgroup label="Onboarding">
+                            <option value="onboarding_content_created">Content Created</option>
+                            <option value="onboarding_content_updated">Content Updated</option>
+                            <option value="onboarding_content_deleted">Content Deleted</option>
+                            <option value="onboarding_item_completed">Item Completed</option>
+                            <option value="onboarding_completed">Onboarding Completed</option>
+                            <option value="onboarding_completion_acknowledged">Completion Acknowledged</option>
+                            <option value="onboarding_completions_bulk_acknowledged">Bulk Acknowledged</option>
+                            <option value="onboarding_completion_email_sent">Completion Email Sent</option>
+                            <option value="onboarding_completion_email_failed">Completion Email Failed</option>
+                        </optgroup>
                     </select>
                 ) : activeTab === 'usage' ? (
                     <select

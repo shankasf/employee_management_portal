@@ -5,6 +5,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatDateOnly, formatDateTime, formatTimeString, getSignedStorageUrl } from '@/lib/utils'
 import { RichTextDisplay } from '@/components/RichTextEditor'
+import { VideoPlayer } from '@/components/VideoPlayer'
 import { taskNotifications } from '@/lib/notifications'
 import { logValidationRejection, startUpload } from '@/lib/upload-logger'
 import { resumableUpload, shouldUseTus } from '@/lib/resumable-upload'
@@ -1048,12 +1049,9 @@ export default function AdminMyTasksPage() {
 
             {/* Complete Task Modal */}
             {selectedTask && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                    <div
-                        className="absolute inset-0 bg-black/50"
-                        onClick={() => { setSelectedTask(null); resetForm() }}
-                    ></div>
-                    <div className="relative card w-full max-w-md max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 z-50 bg-black/50 overflow-y-auto" onClick={() => { setSelectedTask(null); resetForm() }}>
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="relative card w-full max-w-md" onClick={(e) => e.stopPropagation()}>
                         <div className="card-header">
                             <h2 className="card-title">Complete Task</h2>
                             <p className="card-description">{selectedTask.tasks?.title}</p>
@@ -1143,7 +1141,7 @@ export default function AdminMyTasksPage() {
                                     <div className="space-y-2">
                                         {videoPreviews.map((preview, index) => (
                                             <div key={index} className="relative">
-                                                <video src={`${preview}#t=0.1`} className="w-full h-32 object-cover rounded-lg border" preload="metadata" controls />
+                                                <video src={`${preview}#t=0.1`} className="w-full h-32 object-cover rounded-lg border" preload="metadata" controls playsInline disablePictureInPicture />
                                                 <button type="button" onClick={() => removeNewVideo(index)} className="absolute top-2 right-2 bg-destructive text-white rounded-full w-6 h-6 flex items-center justify-center text-sm">✕</button>
                                             </div>
                                         ))}
@@ -1191,14 +1189,15 @@ export default function AdminMyTasksPage() {
                             </button>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* View Task Details Modal */}
             {viewingTask && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                    <div className="absolute inset-0 bg-black/50" onClick={() => setViewingTask(null)}></div>
-                    <div className="relative card w-full max-w-lg max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 z-50 bg-black/50 overflow-y-auto" onClick={() => setViewingTask(null)}>
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="relative card w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
                         <div className="card-header">
                             <div className="flex items-start justify-between">
                                 <div>
@@ -1285,7 +1284,7 @@ export default function AdminMyTasksPage() {
                                     <div className="space-y-2">
                                         {signedRefVideoUrls.map((url, index) => (
                                             <div key={index} className="relative group">
-                                                <video src={`${url}#t=0.1`} className="w-full max-h-48 rounded-lg border" preload="metadata" controls />
+                                                <video src={`${url}#t=0.1`} className="w-full max-h-48 rounded-lg border" preload="metadata" controls playsInline disablePictureInPicture />
                                                 <button onClick={() => setFullscreenVideoUrl(url)} className="absolute top-2 right-2 bg-black/60 hover:bg-black/80 text-white rounded-lg p-1.5 opacity-0 group-hover:opacity-100 transition-opacity" title="View fullscreen">
                                                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
                                                 </button>
@@ -1334,7 +1333,7 @@ export default function AdminMyTasksPage() {
                                         <div className="space-y-2">
                                             {signedVideoUrls.map((url, index) => (
                                                 <div key={index} className="relative group">
-                                                    <video src={`${url}#t=0.1`} className="w-full max-h-64 rounded-lg border" preload="metadata" controls />
+                                                    <video src={`${url}#t=0.1`} className="w-full max-h-64 rounded-lg border" preload="metadata" controls playsInline disablePictureInPicture />
                                                     <button onClick={() => setFullscreenVideoUrl(url)} className="absolute top-2 right-2 bg-black/60 hover:bg-black/80 text-white rounded-lg p-1.5 opacity-0 group-hover:opacity-100 transition-opacity" title="View fullscreen">
                                                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
                                                     </button>
@@ -1367,14 +1366,15 @@ export default function AdminMyTasksPage() {
                             )}
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Edit Submission Modal */}
             {editingTask && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                    <div className="absolute inset-0 bg-black/50" onClick={() => { setEditingTask(null); resetForm() }}></div>
-                    <div className="relative card w-full max-w-md max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 z-50 bg-black/50 overflow-y-auto" onClick={() => { setEditingTask(null); resetForm() }}>
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="relative card w-full max-w-md" onClick={(e) => e.stopPropagation()}>
                         <div className="card-header">
                             <h2 className="card-title">Edit Submission</h2>
                             <p className="card-description">{editingTask.tasks?.title}</p>
@@ -1442,7 +1442,7 @@ export default function AdminMyTasksPage() {
                                         <div className="space-y-2">
                                             {editSignedVideoUrls.map((url, index) => (
                                                 <div key={`existing-video-${index}`} className="relative">
-                                                    <video src={`${url}#t=0.1`} className="w-full h-32 object-cover rounded-lg border" preload="metadata" controls />
+                                                    <video src={`${url}#t=0.1`} className="w-full h-32 object-cover rounded-lg border" preload="metadata" controls playsInline disablePictureInPicture />
                                                     <button type="button" onClick={() => removeExistingVideo(index)} className="absolute top-2 right-2 bg-destructive text-white rounded-full w-5 h-5 flex items-center justify-center text-xs shadow">✕</button>
                                                 </div>
                                             ))}
@@ -1455,7 +1455,7 @@ export default function AdminMyTasksPage() {
                                         <div className="space-y-2">
                                             {videoPreviews.map((preview, index) => (
                                                 <div key={`new-video-${index}`} className="relative">
-                                                    <video src={`${preview}#t=0.1`} className="w-full h-32 object-cover rounded-lg border" preload="metadata" controls />
+                                                    <video src={`${preview}#t=0.1`} className="w-full h-32 object-cover rounded-lg border" preload="metadata" controls playsInline disablePictureInPicture />
                                                     <button type="button" onClick={() => removeNewVideo(index)} className="absolute top-2 right-2 bg-destructive text-white rounded-full w-5 h-5 flex items-center justify-center text-xs shadow">✕</button>
                                                 </div>
                                             ))}
@@ -1495,6 +1495,7 @@ export default function AdminMyTasksPage() {
                             </button>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
@@ -1504,7 +1505,9 @@ export default function AdminMyTasksPage() {
                     <button onClick={() => setFullscreenVideoUrl(null)} className="absolute top-4 right-4 text-white bg-white/20 hover:bg-white/30 rounded-full p-2 z-10">
                         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                     </button>
-                    <video src={fullscreenVideoUrl} controls autoPlay onClick={(e) => e.stopPropagation()} style={{ maxWidth: '100vw', maxHeight: '100vh' }} />
+                    <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: '100vw', maxHeight: '100vh' }}>
+                        <VideoPlayer src={fullscreenVideoUrl} autoPlay className="w-screen h-screen" />
+                    </div>
                 </div>
             )}
         </div>

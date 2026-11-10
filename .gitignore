@@ -37,3 +37,17 @@ next-env.d.ts
 .claude/
 .vscode-upload.json
 prompt.txt
+
+# server-local files (added 2026-11-09)
+.env
+.env.*
+!.env.example
+.next.broken-*/
+*.bak-*
+backups/
+logs.txt
+*.jpeg
+schedule_*.png
+.venv/
+__pycache__/
+supabase/.temp/

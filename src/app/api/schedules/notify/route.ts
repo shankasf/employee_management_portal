@@ -11,12 +11,12 @@ import {
 import {
   sendScheduleAssignedSMS,
   sendScheduleConfirmedSMS,
-  sendCancellationRequestSMS,
   sendCancellationApprovedSMS,
   sendAdminCancelledSMS,
   sendScheduleDeletedSMS,
 } from '@/lib/sms'
 import { formatDateOnly, formatTimeString } from '@/lib/utils'
+import { getEmployeeRecipient } from '@/lib/recipients'
 
 type NotificationType =
   | 'schedule_assigned'
@@ -62,21 +62,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
     }
 
-    // Get schedule with employee details
+    // Get schedule
     const { data: schedule, error: scheduleError } = await supabase
       .from('schedules')
-      .select(`
-        *,
-        employee:employees (
-          id,
-          display_name,
-          phone_number,
-          profiles (
-            email,
-            full_name
-          )
-        )
-      `)
+      .select('*')
       .eq('id', scheduleId)
       .single()
 
@@ -86,11 +75,6 @@ export async function POST(request: NextRequest) {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const scheduleData = schedule as any
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const employee = scheduleData.employee as any
-    const employeeName = employee?.display_name || employee?.profiles?.full_name || 'Employee'
-    const employeeEmail = employee?.profiles?.email
-    const employeePhone = employee?.phone_number
 
     // For employee-initiated actions, verify the requesting user owns this schedule
     const employeeOnlyTypes: NotificationType[] = ['schedule_confirmed', 'cancellation_requested']
@@ -99,6 +83,14 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Forbidden - Not your schedule' }, { status: 403 })
       }
     }
+
+    const recipient = await getEmployeeRecipient(scheduleData.employee_id)
+    if (!recipient) {
+      return NextResponse.json({ success: true, skipped: 'inactive_employee' })
+    }
+    const employeeName = recipient.displayName || recipient.fullName
+    const employeeEmail = recipient.email
+    const employeePhone = recipient.phoneNumber
 
     if (!employeeEmail && type !== 'cancellation_requested') {
       return NextResponse.json({ error: 'Employee email not found' }, { status: 400 })
@@ -163,14 +155,7 @@ export async function POST(request: NextRequest) {
           endTime,
           reason: reason || scheduleData.cancellation_reason || 'No reason provided',
         })
-        // Send SMS to admins
-        smsResult = await sendCancellationRequestSMS({
-          employeeName,
-          scheduleDate,
-          startTime,
-          endTime,
-          reason: reason || scheduleData.cancellation_reason || 'No reason provided',
-        })
+        // No SMS — admin-only notification, email is sufficient.
         break
 
       case 'cancellation_approved':

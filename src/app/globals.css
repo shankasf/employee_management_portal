@@ -480,3 +480,14 @@ video::-webkit-media-controls-fullscreen-button {
 .rich-text-content em {
   font-style: italic;
 }
+
+/* Installed-app shell: height of the mobile bottom tab bar, used to keep
+   page content and floating buttons clear of it. Zero on desktop. */
+:root {
+  --app-bottom-offset: 0px;
+}
+@media (max-width: 1023px) {
+  .app-shell {
+    --app-bottom-offset: calc(4rem + env(safe-area-inset-bottom));
+  }
+}

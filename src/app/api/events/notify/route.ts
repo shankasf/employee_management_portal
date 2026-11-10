@@ -4,11 +4,8 @@ import {
   sendEventAssignedEmail,
   sendEventRemovedEmail,
 } from '@/lib/email'
-import {
-  sendEventAssignedSMS,
-  sendEventRemovedSMS,
-} from '@/lib/sms'
 import { formatDate, formatTime } from '@/lib/utils'
+import { getEmployeeRecipient } from '@/lib/recipients'
 
 type NotificationType = 'event_assigned' | 'event_removed'
 
@@ -32,12 +29,17 @@ export async function POST(request: NextRequest) {
     // Verify user is admin (only admins can send event notifications)
     const { data: profile } = await supabase
       .from('profiles')
-      .select('role')
+      .select('role, admin_scoped')
       .eq('id', user.id)
       .single()
 
-    if ((profile as { role: string } | null)?.role !== 'admin') {
+    const _p = profile as { role: string; admin_scoped?: boolean } | null
+    if (_p?.role !== 'admin') {
       return NextResponse.json({ error: 'Forbidden - Admin only' }, { status: 403 })
+    }
+    // Events are company-wide; not available to scoped (location) admins.
+    if (_p?.admin_scoped) {
+      return NextResponse.json({ error: 'Forbidden - company-wide function' }, { status: 403 })
     }
 
     const body: NotifyRequest = await request.json()
@@ -60,21 +62,12 @@ export async function POST(request: NextRequest) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const eventData = event as any
 
-    // Get employee details
-    const { data: employeeData, error: employeeError } = await supabase
-      .from('employees')
-      .select('*, profiles(email)')
-      .eq('id', employeeId)
-      .single()
-
-    if (employeeError || !employeeData) {
-      return NextResponse.json({ error: 'Employee not found' }, { status: 404 })
+    const recipient = await getEmployeeRecipient(employeeId)
+    if (!recipient) {
+      return NextResponse.json({ success: true, skipped: 'inactive_employee' })
     }
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const employee = employeeData as any
-    const employeeEmail = employee.profiles?.email
-    const employeePhone = employee.phone_number
+    const employeeEmail = recipient.email
+    const employeeName = recipient.displayName || recipient.fullName
 
     if (!employeeEmail) {
       return NextResponse.json({ error: 'Employee email not found' }, { status: 400 })
@@ -89,7 +82,7 @@ export async function POST(request: NextRequest) {
 
     if (type === 'event_assigned') {
       result = await sendEventAssignedEmail({
-        employeeName: employee.display_name || 'Employee',
+        employeeName,
         employeeEmail,
         eventTitle: eventData.title,
         eventDate,
@@ -97,34 +90,13 @@ export async function POST(request: NextRequest) {
         room: eventData.room || undefined,
         role: role || 'Staff',
       })
-      // Send SMS if phone available
-      if (employeePhone) {
-        sendEventAssignedSMS({
-          employeeName: employee.display_name || 'Employee',
-          employeePhone,
-          eventTitle: eventData.title,
-          eventDate,
-          eventTime,
-          room: eventData.room || undefined,
-          role: role || 'Staff',
-        }).catch(err => console.error('Failed to send event assigned SMS:', err))
-      }
     } else if (type === 'event_removed') {
       result = await sendEventRemovedEmail({
-        employeeName: employee.display_name || 'Employee',
+        employeeName,
         employeeEmail,
         eventTitle: eventData.title,
         eventDate,
       })
-      // Send SMS if phone available
-      if (employeePhone) {
-        sendEventRemovedSMS({
-          employeeName: employee.display_name || 'Employee',
-          employeePhone,
-          eventTitle: eventData.title,
-          eventDate,
-        }).catch(err => console.error('Failed to send event removed SMS:', err))
-      }
     } else {
       return NextResponse.json({ error: 'Invalid notification type' }, { status: 400 })
     }

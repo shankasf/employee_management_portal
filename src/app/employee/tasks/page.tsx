@@ -5,6 +5,7 @@ import { useAuth } from '@/contexts/AuthContext'
 import { createUntypedClient } from '@/lib/supabase/client'
 import { formatDateOnly, formatDateTime, formatTimeString, getSignedStorageUrl } from '@/lib/utils'
 import { RichTextDisplay } from '@/components/RichTextEditor'
+import { VideoPlayer } from '@/components/VideoPlayer'
 import { taskNotifications } from '@/lib/notifications'
 import { logValidationRejection, startUpload } from '@/lib/upload-logger'
 import { resumableUpload, shouldUseTus } from '@/lib/resumable-upload'
@@ -31,6 +32,9 @@ interface TaskInstance {
         requires_notes: boolean
         reference_images: string[] | null
         reference_videos: string[] | null
+        is_recurring: boolean
+        frequency: string | null
+        recurrence_days: string[] | null
     } | null
 }
 
@@ -124,7 +128,10 @@ export default function EmployeeTasksPage() {
             requires_video,
             requires_notes,
             reference_images,
-            reference_videos
+            reference_videos,
+            is_recurring,
+            frequency,
+            recurrence_days
           )
         `)
                 .eq('employee_id', user.id)
@@ -171,6 +178,21 @@ export default function EmployeeTasksPage() {
         window.addEventListener('focus', onFocus)
         return () => window.removeEventListener('focus', onFocus)
     }, [loadTasks])
+
+    // Auto-open a specific task when arriving via SMS deep link (?taskId=...).
+    // Runs once tasks have loaded; consumes the param so a refresh doesn't re-open.
+    useEffect(() => {
+        if (loading || tasks.length === 0) return
+        const params = new URLSearchParams(window.location.search)
+        const targetId = params.get('taskId')
+        if (!targetId) return
+        const match = tasks.find(t => t.id === targetId)
+        if (match) setViewingTask(match)
+        params.delete('taskId')
+        const newSearch = params.toString()
+        const newUrl = window.location.pathname + (newSearch ? `?${newSearch}` : '') + window.location.hash
+        window.history.replaceState({}, '', newUrl)
+    }, [loading, tasks])
 
     // Handle photo file selection (multiple)
     function handlePhotoChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1087,6 +1109,13 @@ export default function EmployeeTasksPage() {
                                                 {task.tasks?.cutoff_time && (
                                                     <span>⏰ Due by {formatTimeString(task.tasks.cutoff_time)}</span>
                                                 )}
+                                                {task.tasks?.is_recurring && (
+                                                    <span>🔄 Repeats {task.tasks.frequency === 'daily' ? 'every day' : task.tasks.frequency === 'weekly' ? 'every week' : 'every month'}
+                                                        {task.tasks.recurrence_days && task.tasks.recurrence_days.length > 0 && task.tasks.recurrence_days.length < 7
+                                                            ? ` on ${task.tasks.recurrence_days.map(d => d.charAt(0).toUpperCase() + d.slice(1, 3)).join(', ')}`
+                                                            : ''}
+                                                    </span>
+                                                )}
                                             </div>
                                             {task.status === 'completed' && task.notes && (
                                                 <p className="text-sm text-muted-foreground mt-2 italic line-clamp-1">
@@ -1123,12 +1152,13 @@ export default function EmployeeTasksPage() {
 
             {/* Complete Task Modal */}
             {selectedTask && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                <div className="fixed inset-0 z-50 overflow-y-auto">
                     <div
-                        className="absolute inset-0 bg-black/50"
+                        className="fixed inset-0 bg-black/50"
                         onClick={() => { setSelectedTask(null); resetForm() }}
                     ></div>
-                    <div className="relative card w-full max-w-md max-h-[90vh] overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="relative card w-full max-w-md">
                         <div className="card-header">
                             <h2 className="card-title">Complete Task</h2>
                             <p className="card-description">{selectedTask.tasks?.title}</p>
@@ -1270,6 +1300,8 @@ export default function EmployeeTasksPage() {
                                                     className="w-full h-32 object-cover rounded-lg border"
                                                     preload="metadata"
                                                     controls
+                                                    playsInline
+                                                    disablePictureInPicture
                                                 />
                                                 <button
                                                     type="button"
@@ -1370,17 +1402,19 @@ export default function EmployeeTasksPage() {
                             </button>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* View Task Details Modal */}
             {viewingTask && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                <div className="fixed inset-0 z-50 overflow-y-auto">
                     <div
-                        className="absolute inset-0 bg-black/50"
+                        className="fixed inset-0 bg-black/50"
                         onClick={() => setViewingTask(null)}
                     ></div>
-                    <div className="relative card w-full max-w-lg max-h-[90vh] overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="relative card w-full max-w-lg">
                         <div className="card-header">
                             <div className="flex items-start justify-between">
                                 <div>
@@ -1428,6 +1462,17 @@ export default function EmployeeTasksPage() {
                                     <div className="bg-green-50 rounded-lg p-3">
                                         <p className="text-muted-foreground text-xs">Completed At</p>
                                         <p className="font-medium text-green-700">{formatDateTime(viewingTask.completed_at)}</p>
+                                    </div>
+                                )}
+                                {viewingTask.tasks?.is_recurring && (
+                                    <div className="bg-purple-50 rounded-lg p-3 col-span-2">
+                                        <p className="text-muted-foreground text-xs">Schedule</p>
+                                        <p className="font-medium text-purple-700">
+                                            🔄 This task repeats {viewingTask.tasks.frequency === 'daily' ? 'every day' : viewingTask.tasks.frequency === 'weekly' ? 'every week' : 'every month'}
+                                            {viewingTask.tasks.recurrence_days && viewingTask.tasks.recurrence_days.length > 0 && viewingTask.tasks.recurrence_days.length < 7
+                                                ? ` on ${viewingTask.tasks.recurrence_days.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ')}`
+                                                : ''}
+                                        </p>
                                     </div>
                                 )}
                             </div>
@@ -1489,6 +1534,8 @@ export default function EmployeeTasksPage() {
                                                     className="w-full max-h-48 rounded-lg border"
                                                     preload="metadata"
                                                     controls
+                                                    playsInline
+                                                    disablePictureInPicture
                                                 />
                                                 <button
                                                     onClick={() => setFullscreenVideoUrl(url)}
@@ -1562,6 +1609,8 @@ export default function EmployeeTasksPage() {
                                                         className="w-full max-h-64 rounded-lg border"
                                                         preload="metadata"
                                                         controls
+                                                        playsInline
+                                                        disablePictureInPicture
                                                     />
                                                     <button
                                                         onClick={() => setFullscreenVideoUrl(url)}
@@ -1613,20 +1662,22 @@ export default function EmployeeTasksPage() {
                             )}
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Edit Submission Modal */}
             {editingTask && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                <div className="fixed inset-0 z-50 overflow-y-auto">
                     <div
-                        className="absolute inset-0 bg-black/50"
+                        className="fixed inset-0 bg-black/50"
                         onClick={() => {
                             setEditingTask(null)
                             resetForm()
                         }}
                     ></div>
-                    <div className="relative card w-full max-w-md max-h-[90vh] overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="relative card w-full max-w-md">
                         <div className="card-header">
                             <h2 className="card-title">Edit Submission</h2>
                             <p className="card-description">{editingTask.tasks?.title}</p>
@@ -1757,6 +1808,8 @@ export default function EmployeeTasksPage() {
                                                         className="w-full h-32 object-cover rounded-lg border"
                                                         preload="metadata"
                                                         controls
+                                                        playsInline
+                                                        disablePictureInPicture
                                                     />
                                                     <button
                                                         type="button"
@@ -1782,6 +1835,8 @@ export default function EmployeeTasksPage() {
                                                         className="w-full h-32 object-cover rounded-lg border"
                                                         preload="metadata"
                                                         controls
+                                                        playsInline
+                                                        disablePictureInPicture
                                                     />
                                                     <button
                                                         type="button"
@@ -1864,6 +1919,7 @@ export default function EmployeeTasksPage() {
                             </button>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
@@ -1876,13 +1932,13 @@ export default function EmployeeTasksPage() {
                     >
                         <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                     </button>
-                    <video
-                        src={fullscreenVideoUrl}
-                        controls
-                        autoPlay
-                        onClick={(e) => e.stopPropagation()}
-                        style={{ maxWidth: '100vw', maxHeight: '100vh' }}
-                    />
+                    <div onClick={(e) => e.stopPropagation()} style={{ maxWidth: '100vw', maxHeight: '100vh' }}>
+                        <VideoPlayer
+                            src={fullscreenVideoUrl}
+                            autoPlay
+                            className="w-screen h-screen"
+                        />
+                    </div>
                 </div>
             )}
         </div>

@@ -24,6 +24,7 @@ export async function updateSession(request: NextRequest) {
   if (
     pathname.startsWith('/_next/') ||
     pathname.startsWith('/api/') ||
+    pathname === '/manifest.webmanifest' || // PWA manifest must never redirect to /login
     /\.\w{2,4}$/.test(pathname) // Static files (.ico, .png, .js, .css, etc.)
   ) {
     return NextResponse.next();
@@ -58,10 +59,33 @@ export async function updateSession(request: NextRequest) {
     }
   );
 
+  // Inventory the auth-related cookies we received (names + sizes only — never values)
+  const incomingCookies = request.cookies.getAll();
+  const sbCookies = incomingCookies
+    .filter((c) => c.name.startsWith('sb-') || c.name.toLowerCase().includes('supabase'))
+    .map((c) => ({ name: c.name, len: c.value?.length ?? 0 }));
+  log('incoming cookies', {
+    total: incomingCookies.length,
+    sbCount: sbCookies.length,
+    sb: sbCookies,
+    hasSessionValidated: !!request.cookies.get('session_validated'),
+    hasUserRole: !!request.cookies.get('user_role'),
+  });
+
   // PERFORMANCE: Try getSession() first (reads from cookie, no network call)
   // Only call getUser() if session needs validation
-  const { data: { session } } = await supabase.auth.getSession();
-  log('getSession', { hasSession: !!session, email: session?.user?.email });
+  const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+  const nowSec = Math.floor(Date.now() / 1000);
+  log('getSession', {
+    hasSession: !!session,
+    email: session?.user?.email,
+    expiresAt: session?.expires_at,
+    secondsUntilExpiry: session?.expires_at ? session.expires_at - nowSec : null,
+    isExpired: session?.expires_at ? session.expires_at <= nowSec : null,
+    hasRefreshToken: !!session?.refresh_token,
+    refreshTokenLen: session?.refresh_token?.length ?? 0,
+    error: sessionError?.message,
+  });
 
   // Check if we have a cached session validation timestamp
   // The cookie stores "timestamp:tokenPrefix" to prevent spoofing
@@ -83,10 +107,31 @@ export async function updateSession(request: NextRequest) {
 
   // Only validate with server if session exists and hasn't been validated recently
   if (session && (!lastValidated || now - lastValidated > VALIDATION_INTERVAL)) {
-    log('getUser', { reason: 'validation needed' });
-    const { data: { user: validatedUser } } = await supabase.auth.getUser();
+    const ageMs = lastValidated ? now - lastValidated : null;
+    log('getUser', {
+      reason: lastValidated ? 'cache stale' : 'no cache',
+      cacheAgeMs: ageMs,
+      sessionExpiredBeforeCall: session.expires_at ? session.expires_at <= nowSec : null,
+    });
+    const preAccessToken = session.access_token;
+    const t0 = Date.now();
+    const { data: { user: validatedUser }, error: userError } = await supabase.auth.getUser();
+    const elapsedMs = Date.now() - t0;
     user = validatedUser;
-    log('getUser result', { valid: !!validatedUser });
+
+    // Re-read session after getUser — if SDK refreshed, this will show new tokens
+    const { data: { session: postSession } } = await supabase.auth.getSession();
+    const tokenChanged = !!postSession?.access_token && postSession.access_token !== preAccessToken;
+    log('getUser result', {
+      valid: !!validatedUser,
+      elapsedMs,
+      errorMessage: userError?.message,
+      errorStatus: (userError as { status?: number } | null)?.status,
+      errorCode: (userError as { code?: string } | null)?.code,
+      tokenRefreshed: tokenChanged,
+      newExpiresAt: postSession?.expires_at,
+      newSecondsUntilExpiry: postSession?.expires_at ? postSession.expires_at - Math.floor(Date.now() / 1000) : null,
+    });
 
     // Cache validation timestamp tied to the access token
     if (validatedUser && session.access_token) {
@@ -101,6 +146,8 @@ export async function updateSession(request: NextRequest) {
     }
   } else if (session) {
     log('getUser', { reason: 'skipped - recently validated' });
+  } else {
+    log('getUser', { reason: 'skipped - no session at all (cookies missing or unparseable)' });
   }
 
   // Public routes that don't require authentication
@@ -111,7 +158,13 @@ export async function updateSession(request: NextRequest) {
 
   // If not logged in and trying to access protected route
   if (!user && !isPublicRoute) {
-    log('REDIRECT', { reason: 'no user on protected route', to: '/login' });
+    log('REDIRECT', {
+      reason: 'no user on protected route',
+      to: '/login',
+      hadSessionCookie: sbCookies.length > 0,
+      hadSessionInStorage: !!session,
+      sessionWasExpired: session?.expires_at ? session.expires_at <= nowSec : null,
+    });
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);
@@ -123,24 +176,28 @@ export async function updateSession(request: NextRequest) {
     // Check for cached role in cookie (expires after 5 minutes)
     const cachedRole = request.cookies.get("user_role")?.value;
     const cachedUserId = request.cookies.get("user_role_id")?.value;
+    const cachedScoped = request.cookies.get("user_admin_scoped")?.value;
 
     let role = "employee";
+    let adminScoped = false;
 
     // Use cached role if valid (same user and cache exists)
     if (cachedRole && cachedUserId === user.id) {
       role = cachedRole;
-      log('Role from cache', { role });
+      adminScoped = cachedScoped === "1";
+      log('Role from cache', { role, adminScoped });
     } else {
       // Fetch fresh role from database
       log('Fetching role from DB');
       const { data: profile } = await supabase
         .from("profiles")
-        .select("role")
+        .select("role, admin_scoped")
         .eq("id", user.id)
         .single();
 
       role = profile?.role || "employee";
-      log('Role from DB', { role, profile: !!profile });
+      adminScoped = role === "admin" && !!(profile as { admin_scoped?: boolean } | null)?.admin_scoped;
+      log('Role from DB', { role, adminScoped, profile: !!profile });
 
       // Cache role in cookie for 5 minutes
       supabaseResponse.cookies.set("user_role", role, {
@@ -157,11 +214,18 @@ export async function updateSession(request: NextRequest) {
         secure: true,
         path: "/",
       });
+      supabaseResponse.cookies.set("user_admin_scoped", adminScoped ? "1" : "0", {
+        maxAge: 300,
+        httpOnly: true,
+        sameSite: "lax",
+        secure: true,
+        path: "/",
+      });
     }
 
     const isAdmin = role === "admin";
     const isEmployee = role === "employee";
-    log('Access check', { role, isAdmin, isEmployee, path: pathname });
+    log('Access check', { role, isAdmin, isEmployee, adminScoped, path: pathname });
 
     // Redirect logged-in users from login page
     if (pathname === "/login") {
@@ -178,6 +242,24 @@ export async function updateSession(request: NextRequest) {
       const url = request.nextUrl.clone();
       url.pathname = "/employee";
       return NextResponse.redirect(url);
+    }
+
+    // Scoped (location) admins cannot access company-wide admin sections.
+    if (isAdmin && adminScoped) {
+      const scopedBlockedPrefixes = [
+        "/admin/events",
+        "/admin/reports",
+        "/admin/policies",
+        "/admin/activity-logs",
+        "/admin/clock-debug-logs",
+        "/admin/assistant",
+      ];
+      if (scopedBlockedPrefixes.some((p) => pathname === p || pathname.startsWith(p + "/"))) {
+        log('REDIRECT', { reason: 'scoped admin on restricted section', to: '/admin' });
+        const url = request.nextUrl.clone();
+        url.pathname = "/admin";
+        return NextResponse.redirect(url);
+      }
     }
 
     // Protect employee routes (admins can access everything)

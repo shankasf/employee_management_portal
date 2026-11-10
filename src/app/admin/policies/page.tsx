@@ -1,12 +1,29 @@
 'use client'
 
 import { useState, useRef } from 'react'
+import useSWR from 'swr'
 import { createUntypedClient, createClient } from '@/lib/supabase/client'
 import { formatDateTime } from '@/lib/utils'
 import { usePolicies, useEmployees, invalidateQueries } from '@/lib/hooks/useData'
 import { MediaType } from '@/types/supabase'
 import { RichTextEditor, RichTextDisplay } from '@/components/RichTextEditor'
+import { VideoPlayer } from '@/components/VideoPlayer'
 import { logValidationRejection, startUpload } from '@/lib/upload-logger'
+
+interface ReadReceipt {
+    employee_id: string
+    name: string
+    email: string | null
+    position: string | null
+    read_at: string | null
+}
+
+interface ReadReceiptsResponse {
+    total: number
+    read_count: number
+    unread_count: number
+    items: ReadReceipt[]
+}
 
 interface PolicyStrip {
     id: string
@@ -50,6 +67,19 @@ export default function PoliciesPage() {
     const [sending, setSending] = useState(false)
     const [sendSuccess, setSendSuccess] = useState<string | null>(null)
 
+    // Read receipts modal state
+    const [readsPolicy, setReadsPolicy] = useState<PolicyStrip | null>(null)
+    const [readsFilter, setReadsFilter] = useState<'all' | 'read' | 'unread'>('all')
+    const { data: readsData, isLoading: readsLoading } = useSWR<ReadReceiptsResponse>(
+        readsPolicy ? `/api/admin/policies/${readsPolicy.id}/reads` : null,
+        async (url: string) => {
+            const res = await fetch(url, { credentials: 'include' })
+            if (!res.ok) throw new Error('Failed')
+            return res.json()
+        },
+        { revalidateOnFocus: true }
+    )
+
     // Form state
     const [title, setTitle] = useState('')
     const [content, setContent] = useState('')
@@ -89,7 +119,7 @@ export default function PoliciesPage() {
 
         const { error: uploadError } = await supabase.storage
             .from('policy-media')
-            .upload(fileName, file)
+            .upload(fileName, file, { cacheControl: '31536000', upsert: false })
 
         if (uploadError) {
             tracker.failure(uploadError)
@@ -173,7 +203,7 @@ export default function PoliciesPage() {
             closeModal()
         } catch (err) {
             console.error('Error saving policy:', err)
-            alert('Failed to save policy')
+            alert('Failed to save message')
         } finally {
             setSaving(false)
             setUploading(false)
@@ -258,7 +288,7 @@ export default function PoliciesPage() {
     }
 
     async function deletePolicy(id: string) {
-        if (!confirm('Are you sure you want to delete this policy?')) return
+        if (!confirm('Are you sure you want to delete this message?')) return
 
         try {
             const supabase = createUntypedClient()
@@ -308,14 +338,14 @@ export default function PoliciesPage() {
             const data = await response.json()
 
             if (!response.ok) {
-                throw new Error(data.error || 'Failed to send policy')
+                throw new Error(data.error || 'Failed to send message')
             }
 
             setSendSuccess(data.message)
             setSelectedEmployeeId('')
         } catch (err) {
             console.error('Error sending policy:', err)
-            alert(err instanceof Error ? err.message : 'Failed to send policy')
+            alert(err instanceof Error ? err.message : 'Failed to send message')
         } finally {
             setSending(false)
         }
@@ -328,13 +358,13 @@ export default function PoliciesPage() {
         <div className="space-y-4 sm:space-y-6">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-4">
                 <div>
-                    <h1 className="text-2xl sm:text-3xl font-bold">Policies</h1>
+                    <h1 className="text-2xl sm:text-3xl font-bold">Important Messages</h1>
                     <p className="text-muted-foreground mt-1 text-sm sm:text-base">
-                        Manage policy messages shown to employees
+                        Manage important messages shown to employees
                     </p>
                 </div>
                 <button className="btn-primary w-full sm:w-auto" onClick={() => openModal()}>
-                    + Add Policy
+                    + Add Message
                 </button>
             </div>
 
@@ -377,9 +407,9 @@ export default function PoliciesPage() {
                 </div>
             ) : policies.length === 0 ? (
                 <div className="card p-8 text-center">
-                    <p className="text-muted-foreground mb-4">No policies created yet</p>
+                    <p className="text-muted-foreground mb-4">No messages created yet</p>
                     <button className="btn-primary" onClick={() => openModal()}>
-                        Create Your First Policy
+                        Create Your First Message
                     </button>
                 </div>
             ) : (
@@ -415,17 +445,16 @@ export default function PoliciesPage() {
                                             <div className="mt-2">
                                                 <img
                                                     src={policy.image_url}
-                                                    alt="Policy media"
+                                                    alt="Message media"
                                                     className="max-w-xs max-h-32 rounded-lg object-cover"
                                                 />
                                             </div>
                                         )}
                                         {policy.media_type === 'video' && policy.video_url && (
                                             <div className="mt-2">
-                                                <video
+                                                <VideoPlayer
                                                     src={policy.video_url}
                                                     className="max-w-xs max-h-32 rounded-lg"
-                                                    controls
                                                 />
                                             </div>
                                         )}
@@ -436,13 +465,19 @@ export default function PoliciesPage() {
                                     </div>
                                     <div className="flex gap-2 flex-wrap">
                                         <button
+                                            onClick={() => { setReadsPolicy(policy); setReadsFilter('all') }}
+                                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-lg transition-colors"
+                                        >
+                                            👁️ View Reads
+                                        </button>
+                                        <button
                                             onClick={() => openSendModal(policy)}
                                             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-200 rounded-lg transition-colors"
                                         >
                                             <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                                             </svg>
-                                            Email Policy to Employee
+                                            Email Message to Employee
                                         </button>
                                         <button
                                             onClick={() => togglePolicyStatus(policy.id, policy.is_active)}
@@ -472,14 +507,15 @@ export default function PoliciesPage() {
 
             {/* Modal - Google Style */}
             {showModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                    <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeModal}></div>
-                    <div className="relative bg-white dark:bg-gray-900 w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl shadow-2xl">
+                <div className="fixed inset-0 z-50 overflow-y-auto">
+                    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={closeModal}></div>
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="relative bg-white dark:bg-gray-900 w-full max-w-xl rounded-2xl shadow-2xl">
                         {/* Header */}
                         <div className="sticky top-0 bg-white dark:bg-gray-900 px-6 py-5 border-b border-gray-100 dark:border-gray-800 z-10">
                             <div className="flex items-center justify-between">
                                 <h2 className="text-xl font-medium text-gray-900 dark:text-white">
-                                    {editingPolicy ? 'Edit Policy' : 'Create New Policy'}
+                                    {editingPolicy ? 'Edit Message' : 'Create New Message'}
                                 </h2>
                                 <button
                                     type="button"
@@ -504,25 +540,25 @@ export default function PoliciesPage() {
                                         value={title}
                                         onChange={(e) => setTitle(e.target.value)}
                                         required
-                                        placeholder="Policy title"
+                                        placeholder="Message title"
                                     />
                                     <label
                                         htmlFor="policy-title"
                                         className="absolute left-3 -top-2.5 bg-white dark:bg-gray-900 px-2 text-sm text-gray-500 dark:text-gray-400 transition-all peer-placeholder-shown:top-3.5 peer-placeholder-shown:text-base peer-placeholder-shown:text-gray-400 peer-focus:-top-2.5 peer-focus:text-sm peer-focus:text-blue-500"
                                     >
-                                        Policy Title *
+                                        Message Title *
                                     </label>
                                 </div>
 
                                 {/* Content Field */}
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                                        Policy Content *
+                                        Message Content *
                                     </label>
                                     <RichTextEditor
                                         value={content}
                                         onChange={setContent}
-                                        placeholder="Enter policy content..."
+                                        placeholder="Enter message content..."
                                         minHeight="140px"
                                         required
                                     />
@@ -657,7 +693,7 @@ export default function PoliciesPage() {
                                 {/* Active Toggle - Switch Style */}
                                 <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-800 rounded-xl">
                                     <div>
-                                        <p className="text-sm font-medium text-gray-900 dark:text-white">Policy Status</p>
+                                        <p className="text-sm font-medium text-gray-900 dark:text-white">Message Status</p>
                                         <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
                                             {isActive ? 'Visible to employees' : 'Hidden from employees'}
                                         </p>
@@ -698,19 +734,21 @@ export default function PoliciesPage() {
                                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                         </svg>
                                     )}
-                                    {uploading ? 'Uploading...' : saving ? 'Saving...' : editingPolicy ? 'Save Changes' : 'Create Policy'}
+                                    {uploading ? 'Uploading...' : saving ? 'Saving...' : editingPolicy ? 'Save Changes' : 'Create Message'}
                                 </button>
                             </div>
                         </form>
+                    </div>
                     </div>
                 </div>
             )}
 
             {/* Send to Employee Modal - Google Style */}
             {showSendModal && sendingPolicy && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-                    <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={closeSendModal}></div>
-                    <div className="relative bg-white dark:bg-gray-900 w-full max-w-md rounded-2xl shadow-2xl overflow-hidden">
+                <div className="fixed inset-0 z-50 overflow-y-auto">
+                    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={closeSendModal}></div>
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="relative bg-white dark:bg-gray-900 w-full max-w-md rounded-2xl shadow-2xl">
                         {/* Header */}
                         <div className="px-6 py-5 border-b border-gray-100 dark:border-gray-800">
                             <div className="flex items-center justify-between">
@@ -721,7 +759,7 @@ export default function PoliciesPage() {
                                         </svg>
                                     </div>
                                     <h2 className="text-lg font-medium text-gray-900 dark:text-white">
-                                        Send Policy
+                                        Send Message
                                     </h2>
                                 </div>
                                 <button
@@ -793,7 +831,7 @@ export default function PoliciesPage() {
                                     </div>
                                 </div>
                                 <p className="mt-2 text-xs text-gray-400">
-                                    The policy will be sent to the employee&apos;s email address
+                                    The message will be sent to the employee&apos;s email address
                                 </p>
                             </div>
                         </div>
@@ -819,8 +857,123 @@ export default function PoliciesPage() {
                                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                     </svg>
                                 )}
-                                {sending ? 'Sending...' : 'Send Policy'}
+                                {sending ? 'Sending...' : 'Send Message'}
                             </button>
+                        </div>
+                    </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Read Receipts Modal */}
+            {readsPolicy && (
+                <div className="fixed inset-0 z-50 overflow-y-auto">
+                    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setReadsPolicy(null)}></div>
+                    <div className="flex min-h-full items-center justify-center p-4">
+                        <div className="relative bg-white dark:bg-gray-900 w-full max-w-lg rounded-2xl shadow-2xl">
+                            <div className="px-6 py-5 border-b border-gray-100 dark:border-gray-800">
+                                <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <p className="text-xs text-muted-foreground">Read receipts for</p>
+                                        <h2 className="text-lg font-semibold text-gray-900 dark:text-white truncate">
+                                            {readsPolicy.title}
+                                        </h2>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setReadsPolicy(null)}
+                                        className="p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-full transition-colors"
+                                    >
+                                        <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                                        </svg>
+                                    </button>
+                                </div>
+
+                                {/* Summary */}
+                                {readsData && (
+                                    <div className="grid grid-cols-3 gap-2 mt-4">
+                                        <button
+                                            type="button"
+                                            onClick={() => setReadsFilter('all')}
+                                            className={`p-2 rounded-lg text-center border transition-colors ${
+                                                readsFilter === 'all' ? 'bg-accent border-primary' : 'border-border hover:bg-accent/50'
+                                            }`}
+                                        >
+                                            <div className="text-lg font-bold">{readsData.total}</div>
+                                            <div className="text-xs text-muted-foreground">Total</div>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setReadsFilter('read')}
+                                            className={`p-2 rounded-lg text-center border transition-colors ${
+                                                readsFilter === 'read' ? 'bg-green-50 dark:bg-green-900/30 border-green-400' : 'border-border hover:bg-accent/50'
+                                            }`}
+                                        >
+                                            <div className="text-lg font-bold text-green-600">{readsData.read_count}</div>
+                                            <div className="text-xs text-muted-foreground">Read</div>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setReadsFilter('unread')}
+                                            className={`p-2 rounded-lg text-center border transition-colors ${
+                                                readsFilter === 'unread' ? 'bg-amber-50 dark:bg-amber-900/30 border-amber-400' : 'border-border hover:bg-accent/50'
+                                            }`}
+                                        >
+                                            <div className="text-lg font-bold text-amber-600">{readsData.unread_count}</div>
+                                            <div className="text-xs text-muted-foreground">Unread</div>
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="px-2 py-2 max-h-[60vh] overflow-y-auto">
+                                {readsLoading && (
+                                    <div className="p-6 text-center text-sm text-muted-foreground">Loading…</div>
+                                )}
+                                {readsData && (() => {
+                                    const filtered = readsData.items.filter(i =>
+                                        readsFilter === 'all' ? true :
+                                        readsFilter === 'read' ? !!i.read_at : !i.read_at
+                                    )
+                                    if (filtered.length === 0) {
+                                        return <div className="p-6 text-center text-sm text-muted-foreground">No employees in this view.</div>
+                                    }
+                                    return (
+                                        <ul className="divide-y divide-border">
+                                            {filtered.map(i => (
+                                                <li key={i.employee_id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                                                    <div className="min-w-0">
+                                                        <p className="font-medium text-sm truncate">{i.name}</p>
+                                                        {i.email && (
+                                                            <p className="text-xs text-muted-foreground truncate">{i.email}</p>
+                                                        )}
+                                                    </div>
+                                                    {i.read_at ? (
+                                                        <span className="text-xs text-green-700 dark:text-green-300 font-medium whitespace-nowrap">
+                                                            ✓ {formatDateTime(i.read_at)}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-xs text-amber-700 dark:text-amber-300 font-medium whitespace-nowrap">
+                                                            Not read
+                                                        </span>
+                                                    )}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    )
+                                })()}
+                            </div>
+
+                            <div className="bg-gray-50 dark:bg-gray-800/50 px-6 py-3 border-t border-gray-100 dark:border-gray-800 flex justify-end">
+                                <button
+                                    type="button"
+                                    onClick={() => setReadsPolicy(null)}
+                                    className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+                                >
+                                    Close
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>

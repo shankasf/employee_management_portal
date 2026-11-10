@@ -366,8 +366,9 @@ export default function EventsPage() {
 
             {/* Create/Edit Event Modal */}
             {showModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-lg">
                         <div className="p-6">
                             <h2 className="text-xl font-bold mb-4">
                                 {editingEvent ? 'Edit Event' : 'Create New Event'}
@@ -454,13 +455,15 @@ export default function EventsPage() {
                             </form>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* View Event Modal */}
             {showViewModal && viewingEvent && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-                    <div className="bg-card rounded-lg shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
+                    <div className="bg-card rounded-lg shadow-lg w-full max-w-lg">
                         <div className="p-6">
                             <h2 className="text-xl font-bold mb-4">🎉 {viewingEvent.title}</h2>
                             <div className="space-y-4">
@@ -534,12 +537,14 @@ export default function EventsPage() {
                             </div>
                         </div>
                     </div>
+                    </div>
                 </div>
             )}
 
             {/* Assign Staff Modal */}
             {showAssignModal && assigningEvent && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+                <div className="fixed inset-0 bg-black/50 z-50 overflow-y-auto">
+                    <div className="flex min-h-full items-center justify-center p-4">
                     <div className="bg-card rounded-lg shadow-lg w-full max-w-md">
                         <div className="p-6">
                             <h2 className="text-xl font-bold mb-2">Assign Staff</h2>
@@ -593,6 +598,7 @@ export default function EventsPage() {
                                 </div>
                             </form>
                         </div>
+                    </div>
                     </div>
                 </div>
             )}

@@ -7,9 +7,9 @@ import {
 } from '@/lib/email'
 import {
   sendTaskAssignedSMS,
-  sendTaskCompletedSMS,
 } from '@/lib/sms'
-import { formatDateOnly, formatDateTime, getTodayNY } from '@/lib/utils'
+import { formatDateOnly, formatDateTime, formatTimeString, getTodayNY } from '@/lib/utils'
+import { getEmployeeRecipient } from '@/lib/recipients'
 
 type NotificationType = 'task_assigned' | 'task_completed'
 
@@ -58,8 +58,9 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Missing required fields for task assignment' }, { status: 400 })
       }
 
-      // Get task instance with task and employee details
+      // Get task instance + task; recipient is resolved centrally below
       let taskInstance
+      let resolvedEmployeeId: string
       if (taskInstanceId) {
         const { data, error } = await supabase
           .from('task_instances')
@@ -68,15 +69,8 @@ export async function POST(request: NextRequest) {
             tasks (
               title,
               description,
-              location
-            ),
-            employees (
-              id,
-              display_name,
-              phone_number,
-              profiles (
-                email
-              )
+              location,
+              cutoff_time
             )
           `)
           .eq('id', taskInstanceId)
@@ -86,8 +80,9 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: 'Task instance not found' }, { status: 404 })
         }
         taskInstance = data
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        resolvedEmployeeId = (data as any).employee_id
       } else {
-        // Get task separately
         const { data: taskData, error: taskError } = await supabase
           .from('tasks')
           .select('*')
@@ -98,37 +93,30 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ error: 'Task not found' }, { status: 404 })
         }
 
-        // Get employee separately
-        const { data: empData, error: empError } = await supabase
-          .from('employees')
-          .select('*, profiles(email)')
-          .eq('id', employeeId!)
-          .single()
-
-        if (empError || !empData) {
-          return NextResponse.json({ error: 'Employee not found' }, { status: 404 })
-        }
-
         taskInstance = {
           tasks: taskData,
-          employees: empData,
           scheduled_date: getTodayNY(),
         }
+        resolvedEmployeeId = employeeId!
+      }
+
+      const recipient = await getEmployeeRecipient(resolvedEmployeeId)
+      if (!recipient) {
+        return NextResponse.json({ success: true, skipped: 'inactive_employee' })
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const taskInstanceData = taskInstance as any
       const task = taskInstanceData.tasks
-      const employee = taskInstanceData.employees
-      const employeeEmail = employee?.profiles?.email
-      const employeePhone = employee?.phone_number
+      const employeeEmail = recipient.email
+      const employeePhone = recipient.phoneNumber
 
       if (!employeeEmail) {
         return NextResponse.json({ error: 'Employee email not found' }, { status: 400 })
       }
 
       result = await sendTaskAssignedEmail({
-        employeeName: employee.display_name || 'Employee',
+        employeeName: recipient.displayName || recipient.fullName,
         employeeEmail,
         taskTitle: task.title,
         taskDescription: task.description || undefined,
@@ -136,15 +124,26 @@ export async function POST(request: NextRequest) {
         location: task.location || undefined,
       })
 
-      // Send SMS if phone available
-      if (employeePhone) {
+      // Send SMS only when we have a real task_instance.id, so every SMS
+      // carries a unique deep link. The taskId+employeeId fallback synthesizes
+      // an instance with no id — skip SMS there to avoid a non-unique URL.
+      const resolvedInstanceId: string | undefined = taskInstanceId || taskInstanceData.id
+      if (employeePhone && resolvedInstanceId) {
+        const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://admin.playfunia.com'
+        const taskUrl = `${baseUrl}/employee/tasks?taskId=${resolvedInstanceId}`
+
         sendTaskAssignedSMS({
-          employeeName: employee.display_name || 'Employee',
+          employeeName: recipient.displayName || recipient.fullName,
           employeePhone,
           taskTitle: task.title,
           scheduledDate: formatDateOnly(taskInstanceData.scheduled_date),
+          cutoffTime: task.cutoff_time ? formatTimeString(task.cutoff_time) : undefined,
           location: task.location || undefined,
+          taskDescription: task.description || undefined,
+          taskUrl,
         }).catch(err => console.error('Failed to send task assigned SMS:', err))
+      } else if (employeePhone && !resolvedInstanceId) {
+        console.warn('[tasks/notify] Skipping SMS: no task_instance.id available for deep link')
       }
 
     } else if (type === 'task_completed') {
@@ -196,14 +195,6 @@ export async function POST(request: NextRequest) {
         notes: notes || taskInstanceData.notes || undefined,
       })
 
-      // Send SMS notification to admins
-      sendTaskCompletedSMS({
-        employeeName: employee?.display_name || 'Employee',
-        taskTitle: task?.title || 'Unknown Task',
-        scheduledDate: formatDateOnly(taskInstanceData.scheduled_date),
-        completedAt: formatDateTime(taskInstanceData.completed_at || new Date().toISOString()),
-      }).catch(err => console.error('Failed to send task completed SMS:', err))
-
       // Create next recurring task instance if applicable (non-blocking)
       createNextRecurringInstance(
         taskInstanceData.task_id,
@@ -253,7 +244,7 @@ async function createNextRecurringInstance(
 
   const frequency = task.frequency || 'daily'
 
-  // Calculate next scheduled date
+  // Calculate next scheduled date based on the completed instance's date + interval
   const [y, m, d] = lastScheduledDate.split('-').map(Number)
   const nextDate = new Date(y, m - 1, d, 12, 0, 0)
 
@@ -271,7 +262,29 @@ async function createNextRecurringInstance(
       nextDate.setDate(nextDate.getDate() + 1)
   }
 
-  const nextDateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}-${String(nextDate.getDate()).padStart(2, '0')}`
+  let nextDateStr = `${nextDate.getFullYear()}-${String(nextDate.getMonth() + 1).padStart(2, '0')}-${String(nextDate.getDate()).padStart(2, '0')}`
+
+  // Clamp to today (NY): the next instance must never land in the past. This stops
+  // the date "drift" that occurs when tasks are completed late or in a backlog —
+  // the next occurrence is always anchored to the real calendar, not the old date.
+  const todayNY = getTodayNY()
+  if (nextDateStr < todayNY) {
+    nextDateStr = todayNY
+  }
+
+  // Don't pile up duplicates: if this employee already has an open (pending) instance
+  // for this task, skip — they already have something to do for this recurring task.
+  const { data: existingPending } = await supabaseAdmin
+    .from('task_instances')
+    .select('id')
+    .eq('task_id', taskId)
+    .eq('employee_id', employeeId)
+    .eq('status', 'pending')
+    .limit(1)
+
+  if (existingPending && existingPending.length > 0) {
+    return
+  }
 
   // Create new instance (ignore if duplicate exists via unique constraint)
   const { error: insertError } = await supabaseAdmin

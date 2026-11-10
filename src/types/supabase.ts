@@ -41,6 +41,8 @@ export type Database = {
           full_name: string | null;
           role: "admin" | "employee";
           status: "active" | "inactive";
+          is_super_admin: boolean;
+          admin_scoped: boolean;
           reset_token_hash: string | null;
           reset_token_expires: string | null;
           email_confirmed_at: string | null;
@@ -53,6 +55,8 @@ export type Database = {
           full_name?: string | null;
           role?: "admin" | "employee";
           status?: "active" | "inactive";
+          is_super_admin?: boolean;
+          admin_scoped?: boolean;
           reset_token_hash?: string | null;
           reset_token_expires?: string | null;
           email_confirmed_at?: string | null;
@@ -65,6 +69,8 @@ export type Database = {
           full_name?: string | null;
           role?: "admin" | "employee";
           status?: "active" | "inactive";
+          is_super_admin?: boolean;
+          admin_scoped?: boolean;
           reset_token_hash?: string | null;
           reset_token_expires?: string | null;
           email_confirmed_at?: string | null;
@@ -198,12 +204,20 @@ export type Database = {
           clock_out_lng: number | null;
           clock_out_accuracy: number | null;
           clock_out_location_status: string | null;
+          // Resolved location names
+          clock_in_location_name: string | null;
+          clock_out_location_name: string | null;
           // Late clock-out tracking
           actual_clock_out: string | null;
           late_clock_out_minutes: number | null;
           // Other fields
           break_minutes: number | null;
           work_type: string | null;
+          shift_timing: string | null;
+          break_locations: Json[] | null;
+          break_start: string | null;
+          break_reminder_sent_at: string | null;
+          edited_by_admin: boolean;
           notes: string | null;
           created_at: string;
           updated_at: string;
@@ -228,10 +242,17 @@ export type Database = {
           clock_out_lng?: number | null;
           clock_out_accuracy?: number | null;
           clock_out_location_status?: string | null;
+          clock_in_location_name?: string | null;
+          clock_out_location_name?: string | null;
           actual_clock_out?: string | null;
           late_clock_out_minutes?: number | null;
           break_minutes?: number | null;
           work_type?: string | null;
+          shift_timing?: string | null;
+          break_locations?: Json[] | null;
+          break_start?: string | null;
+          break_reminder_sent_at?: string | null;
+          edited_by_admin?: boolean;
           notes?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -256,10 +277,17 @@ export type Database = {
           clock_out_lng?: number | null;
           clock_out_accuracy?: number | null;
           clock_out_location_status?: string | null;
+          clock_in_location_name?: string | null;
+          clock_out_location_name?: string | null;
           actual_clock_out?: string | null;
           late_clock_out_minutes?: number | null;
           break_minutes?: number | null;
           work_type?: string | null;
+          shift_timing?: string | null;
+          break_locations?: Json[] | null;
+          break_start?: string | null;
+          break_reminder_sent_at?: string | null;
+          edited_by_admin?: boolean;
           notes?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -280,6 +308,8 @@ export type Database = {
           requires_notes: boolean;
           reference_images: string[] | null;
           reference_videos: string[] | null;
+          assigned_employee_ids: string[] | null;
+          recurrence_days: string[] | null;
           created_by: string | null;
           created_at: string;
           updated_at: string;
@@ -298,6 +328,8 @@ export type Database = {
           requires_notes?: boolean;
           reference_images?: string[] | null;
           reference_videos?: string[] | null;
+          assigned_employee_ids?: string[] | null;
+          recurrence_days?: string[] | null;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -316,6 +348,8 @@ export type Database = {
           requires_notes?: boolean;
           reference_images?: string[] | null;
           reference_videos?: string[] | null;
+          assigned_employee_ids?: string[] | null;
+          recurrence_days?: string[] | null;
           created_by?: string | null;
           created_at?: string;
           updated_at?: string;
@@ -845,6 +879,425 @@ export type Database = {
           created_at?: string;
         };
       };
+      businesses: {
+        Row: {
+          id: number;
+          name: string;
+          location: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: number;
+          name: string;
+          location?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: number;
+          name?: string;
+          location?: string | null;
+          created_at?: string;
+        };
+      };
+      employee_businesses: {
+        Row: {
+          employee_id: string;
+          business_id: number;
+        };
+        Insert: {
+          employee_id: string;
+          business_id: number;
+        };
+        Update: {
+          employee_id?: string;
+          business_id?: number;
+        };
+      };
+      admin_businesses: {
+        Row: {
+          id: number;
+          admin_id: string;
+          business_id: number;
+          created_at: string;
+        };
+        Insert: {
+          id?: number;
+          admin_id: string;
+          business_id: number;
+          created_at?: string;
+        };
+        Update: {
+          id?: number;
+          admin_id?: string;
+          business_id?: number;
+          created_at?: string;
+        };
+      };
+      org_nodes: {
+        Row: {
+          id: string;
+          parent_id: string | null;
+          node_type: "person" | "role" | "brand" | "location";
+          name: string;
+          subtitle: string | null;
+          business_id: number | null;
+          photo_url: string | null;
+          sort_order: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          parent_id?: string | null;
+          node_type: "person" | "role" | "brand" | "location";
+          name: string;
+          subtitle?: string | null;
+          business_id?: number | null;
+          photo_url?: string | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          parent_id?: string | null;
+          node_type?: "person" | "role" | "brand" | "location";
+          name?: string;
+          subtitle?: string | null;
+          business_id?: number | null;
+          photo_url?: string | null;
+          sort_order?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+      };
+      notifications: {
+        Row: {
+          id: string;
+          user_id: string;
+          type: string;
+          title: string;
+          body: string | null;
+          link: string | null;
+          is_read: boolean;
+          dedupe_key: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          type: string;
+          title: string;
+          body?: string | null;
+          link?: string | null;
+          is_read?: boolean;
+          dedupe_key?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          type?: string;
+          title?: string;
+          body?: string | null;
+          link?: string | null;
+          is_read?: boolean;
+          dedupe_key?: string | null;
+          created_at?: string;
+        };
+      };
+      push_subscriptions: {
+        Row: {
+          id: string;
+          user_id: string;
+          endpoint: string;
+          p256dh: string;
+          auth: string;
+          user_agent: string | null;
+          created_at: string;
+          updated_at: string;
+          last_success_at: string | null;
+          last_error: string | null;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          endpoint: string;
+          p256dh: string;
+          auth: string;
+          user_agent?: string | null;
+          created_at?: string;
+          updated_at?: string;
+          last_success_at?: string | null;
+          last_error?: string | null;
+        };
+        Update: {
+          id?: string;
+          user_id?: string;
+          endpoint?: string;
+          p256dh?: string;
+          auth?: string;
+          user_agent?: string | null;
+          created_at?: string;
+          updated_at?: string;
+          last_success_at?: string | null;
+          last_error?: string | null;
+        };
+      };
+      calendar_connections: {
+        Row: {
+          id: string;
+          user_id: string;
+          provider: "google" | "microsoft";
+          provider_account_id: string | null;
+          provider_account_email: string | null;
+          access_token_enc: string | null;
+          refresh_token_enc: string | null;
+          token_expires_at: string | null;
+          scopes: string | null;
+          target_calendar_id: string | null;
+          target_calendar_name: string;
+          sync_token: string | null;
+          watch_channel_id: string | null;
+          watch_resource_id: string | null;
+          watch_secret: string | null;
+          watch_expires_at: string | null;
+          status: "active" | "needs_reauth" | "revoked" | "error";
+          last_synced_at: string | null;
+          last_error: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          provider: "google" | "microsoft";
+          provider_account_id?: string | null;
+          provider_account_email?: string | null;
+          access_token_enc?: string | null;
+          refresh_token_enc?: string | null;
+          token_expires_at?: string | null;
+          scopes?: string | null;
+          target_calendar_id?: string | null;
+          target_calendar_name?: string;
+          sync_token?: string | null;
+          watch_channel_id?: string | null;
+          watch_resource_id?: string | null;
+          watch_secret?: string | null;
+          watch_expires_at?: string | null;
+          status?: "active" | "needs_reauth" | "revoked" | "error";
+          last_synced_at?: string | null;
+          last_error?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<{
+          provider_account_id: string | null;
+          provider_account_email: string | null;
+          access_token_enc: string | null;
+          refresh_token_enc: string | null;
+          token_expires_at: string | null;
+          scopes: string | null;
+          target_calendar_id: string | null;
+          target_calendar_name: string;
+          sync_token: string | null;
+          watch_channel_id: string | null;
+          watch_resource_id: string | null;
+          watch_secret: string | null;
+          watch_expires_at: string | null;
+          status: "active" | "needs_reauth" | "revoked" | "error";
+          last_synced_at: string | null;
+          last_error: string | null;
+          updated_at: string;
+        }>;
+      };
+      calendar_sync_prefs: {
+        Row: {
+          user_id: string;
+          sync_shifts: boolean;
+          sync_tasks: boolean;
+          sync_events: boolean;
+          sync_birthdays: boolean;
+          sync_onboarding: boolean;
+          share_external_with_admin: boolean;
+          share_external_details: boolean;
+          reminder_minutes: number;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          user_id: string;
+          sync_shifts?: boolean;
+          sync_tasks?: boolean;
+          sync_events?: boolean;
+          sync_birthdays?: boolean;
+          sync_onboarding?: boolean;
+          share_external_with_admin?: boolean;
+          share_external_details?: boolean;
+          reminder_minutes?: number;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<{
+          sync_shifts: boolean;
+          sync_tasks: boolean;
+          sync_events: boolean;
+          sync_birthdays: boolean;
+          sync_onboarding: boolean;
+          share_external_with_admin: boolean;
+          share_external_details: boolean;
+          reminder_minutes: number;
+          updated_at: string;
+        }>;
+      };
+      calendar_event_links: {
+        Row: {
+          id: string;
+          connection_id: string;
+          user_id: string;
+          source_type: "schedule" | "task" | "event" | "birthday" | "onboarding";
+          source_id: string;
+          external_event_id: string;
+          content_hash: string | null;
+          deleted_at: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          connection_id: string;
+          user_id: string;
+          source_type: "schedule" | "task" | "event" | "birthday" | "onboarding";
+          source_id: string;
+          external_event_id: string;
+          content_hash?: string | null;
+          deleted_at?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: Partial<{
+          external_event_id: string;
+          content_hash: string | null;
+          deleted_at: string | null;
+          updated_at: string;
+        }>;
+      };
+      calendar_external_events: {
+        Row: {
+          id: string;
+          connection_id: string;
+          user_id: string;
+          provider: string;
+          external_id: string;
+          calendar_id: string | null;
+          title: string | null;
+          description: string | null;
+          location: string | null;
+          starts_at: string | null;
+          ends_at: string | null;
+          all_day: boolean;
+          transparency: string | null;
+          status: string | null;
+          organizer_email: string | null;
+          html_link: string | null;
+          is_playfunia: boolean;
+          updated_at: string;
+        };
+        Insert: {
+          id?: string;
+          connection_id: string;
+          user_id: string;
+          provider: string;
+          external_id: string;
+          calendar_id?: string | null;
+          title?: string | null;
+          description?: string | null;
+          location?: string | null;
+          starts_at?: string | null;
+          ends_at?: string | null;
+          all_day?: boolean;
+          transparency?: string | null;
+          status?: string | null;
+          organizer_email?: string | null;
+          html_link?: string | null;
+          is_playfunia?: boolean;
+          updated_at?: string;
+        };
+        Update: Partial<{
+          title: string | null;
+          description: string | null;
+          location: string | null;
+          starts_at: string | null;
+          ends_at: string | null;
+          all_day: boolean;
+          transparency: string | null;
+          status: string | null;
+          is_playfunia: boolean;
+          updated_at: string;
+        }>;
+      };
+      calendar_feed_tokens: {
+        Row: {
+          id: string;
+          user_id: string;
+          token_hash: string;
+          label: string | null;
+          last_used_at: string | null;
+          revoked_at: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          token_hash: string;
+          label?: string | null;
+          last_used_at?: string | null;
+          revoked_at?: string | null;
+          created_at?: string;
+        };
+        Update: Partial<{
+          label: string | null;
+          last_used_at: string | null;
+          revoked_at: string | null;
+        }>;
+      };
+      calendar_change_requests: {
+        Row: {
+          id: string;
+          user_id: string;
+          connection_id: string | null;
+          source_type: string;
+          source_id: string;
+          kind: "cancel" | "reschedule";
+          requested_start: string | null;
+          requested_end: string | null;
+          note: string | null;
+          status: "pending" | "approved" | "rejected" | "superseded";
+          resolved_at: string | null;
+          resolved_by: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          user_id: string;
+          connection_id?: string | null;
+          source_type: string;
+          source_id: string;
+          kind: "cancel" | "reschedule";
+          requested_start?: string | null;
+          requested_end?: string | null;
+          note?: string | null;
+          status?: "pending" | "approved" | "rejected" | "superseded";
+          resolved_at?: string | null;
+          resolved_by?: string | null;
+          created_at?: string;
+        };
+        Update: Partial<{
+          status: "pending" | "approved" | "rejected" | "superseded";
+          resolved_at: string | null;
+          resolved_by: string | null;
+        }>;
+      };
     };
     Views: {
       employee_recent_transactions: {
@@ -1039,6 +1492,9 @@ export type NotificationRecipient = Tables<"notification_recipients">;
 export type ActivityLog = Tables<"activity_logs">;
 export type UsageLog = Tables<"usage_logs">;
 export type UploadLog = Tables<"upload_logs">;
+export type Business = Tables<"businesses">;
+export type EmployeeBusiness = Tables<"employee_businesses">;
+export type OrgNode = Tables<"org_nodes">;
 
 // Extended types with relations
 export type EmployeeWithProfile = Employee & {
